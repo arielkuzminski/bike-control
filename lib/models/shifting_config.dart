@@ -276,8 +276,9 @@ class ShiftingConfig {
           ergStartSource == other.ergStartSource &&
           ergStepW == other.ergStepW);
 
+  // Object.hash takes at most 20 values; the config now has more fields.
   @override
-  int get hashCode => Object.hash(
+  int get hashCode => Object.hashAll([
         name,
         trainerKey,
         isActive,
@@ -299,5 +300,5 @@ class ShiftingConfig {
         powerAt30KphW,
         ergStartSource,
         ergStepW,
-      );
+      ]);
 }

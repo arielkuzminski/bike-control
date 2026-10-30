@@ -418,6 +418,37 @@ class FitnessBikeDefinition extends BleDefinition {
   /// Flywheel speed over cadence, approximate; null until it is known.
   ValueListenable<double?> get estimatedChainRatio => _estimatedChainRatioN;
 
+  /// Whether the trainer is a smart bike (no real chain, e.g. Kickr Bike).
+  bool get isSmartBike => _isSmartBike;
+
+  double _realChainRatio = physics.kAssumedChainRatio;
+
+  /// The ratio the rider's real chain is on (chainring / cog). Track resistance
+  /// works out the trainer's own speed from it.
+  double get realChainRatio => _realChainRatio;
+
+  void setRealChainRatio(double ratio) {
+    if (ratio <= 0 || ratio == _realChainRatio) return;
+    _realChainRatio = ratio;
+    _controlChanged(force: true);
+  }
+
+  /// Whether the trainer's own shifting had to be switched off. Never done here.
+  bool get forcedOffNativeShifting => false;
+
+  /// Diagnostics lines the full implementation reports; not tracked here.
+  String? get ftmsStartSummary => null;
+  String? get ergFollowSummary => null;
+
+  int? _lastErgTarget;
+
+  /// The last ERG target above 0 W, kept after ERG ends so it can resume there.
+  int? get lastErgTarget {
+    final current = _ergTargetPower.value;
+    if (current != null && current > 0) _lastErgTarget = current;
+    return _lastErgTarget;
+  }
+
   /// A smart bike has no real chain, so there is nothing to place.
   bool get _isSmartBike => RegExp(r'\bbike\b', caseSensitive: false).hasMatch(connectedDevice.name ?? '');
 
@@ -819,6 +850,7 @@ class FitnessBikeDefinition extends BleDefinition {
   /// with the shift buttons, asks for).
   void setManualErgPower(Object? watts) {
     final value = (watts as num).round().clamp(0, 2000);
+    if (value > 0) _lastErgTarget = value;
     _ergTargetPower.value = value;
     _trainerMode.value = TrainerMode.ergMode;
     _updateChainHint();
@@ -1401,6 +1433,7 @@ class FitnessBikeDefinition extends BleDefinition {
           windResistanceKgPerM: cw,
           windSpeedMps: wind,
           difficulty: difficulty,
+          trainerChainRatio: _isSmartBike ? physics.kAssumedChainRatio : _realChainRatio,
         );
         _sendUpstream(
           BikeSimulation(

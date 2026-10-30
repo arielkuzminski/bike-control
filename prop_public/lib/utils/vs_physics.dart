@@ -121,6 +121,7 @@ double trackResistanceGrade({
   double windResistanceKgPerM = 0.51,
   double windSpeedMps = 0,
   double difficulty = 1,
+  double trainerChainRatio = kAssumedChainRatio,
 }) {
   final wanted = difficulty * resistiveForceN(
     speedMps: virtualSpeedMps(cadenceRpm: cadenceRpm, gearRatio: gearRatio),
@@ -130,7 +131,7 @@ double trackResistanceGrade({
     windResistanceKgPerM: windResistanceKgPerM,
     windSpeedMps: windSpeedMps,
   );
-  final trainerSpeed = virtualSpeedMps(cadenceRpm: cadenceRpm, gearRatio: kAssumedChainRatio);
+  final trainerSpeed = virtualSpeedMps(cadenceRpm: cadenceRpm, gearRatio: trainerChainRatio);
   final trainerAir = windResistanceKgPerM * trainerSpeed * trainerSpeed;
   final x = (wanted - trainerAir) / (massKg * kGravity);
   final first = math.asin(x.clamp(-1.0, 1.0));
