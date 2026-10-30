@@ -45,6 +45,7 @@ Best follow our landing page and the "Get Started" button: [bikecontrol.app](htt
 - Rouvy
 - Strappo
 - Ride Cave
+- Velotoss
 - Tacx Training
 - FulGaz
 - [OpenBikeControl](https://openbikecontrol.org) compatible apps
@@ -97,6 +98,9 @@ You can even try it out in your [Browser](https://openbikecontrol.github.io/bike
 
 ## Help
 Check the troubleshooting guide [here](TROUBLESHOOTING.md).
+
+## Riding outside?
+BikeControl is for the trainer. For outdoor rides there's [BikeOtter](https://bikeotter.app), my companion app for Wahoo ELEMNT and Garmin Edge bike computers: plan a route, send it with water and café stops straight to the unit over Bluetooth, pull rides off it without the cloud, and share a live map with friends.
 
 ## How does it work?
 The app connects to your Controller devices (such as Zwift ones) automatically. BikeControl uses different methods of connecting to the trainer app, depending on the trainer app and operating system:
