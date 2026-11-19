@@ -1,3 +1,38 @@
+### 7.6.0 (17-11-2026)
+**Features**:
+- Incyclist, Tour du Pain and Rampida are now officially supported via OpenBikeControl.
+- CYCPLUS T7 shifters work as controllers: all eight buttons, steering on the rear arrows by default.
+- OpenBikeControl apps now see your virtual gear, live.
+- A clearer button editor: actions are grouped by what they do (Gears, Trainer, Workout, Riding, …), and on phones it opens as a bottom sheet.
+- Shimano Di2: a third setup option – set the D-Fly channels yourself in E-TUBE, with a step-by-step guide.
+- Zwift Click V2: you can optionally use the right controller without unlocking it.
+- More room to try: 120 button presses a day during the trial (was 80), 40 a day after it (was 15), and 30 minutes a day of BikeControl's own virtual shifting without Pro (was 20).
+
+**Fixes**:
+- Elite trainers no longer show up twice (WiFi and Bluetooth).
+- Windows: BikeControl no longer crashes when it closes, or on network, notification and Bluetooth errors.
+- Android: no more crash when Android restarts the background service, and Close & quit always quits.
+- Shimano Di2: the channel setup stops cleanly when a shifter doesn't take the setting.
+
+### 7.5.0 (09-11-2026)
+**Features**:
+- BikeControl is now available on Linux (.deb and AppImage).
+- A lot more trainer apps are now officially supported via OpenBikeControl: Grimpa, icTrainer, Auuki, VoxVelo, VeloWorkout, Pedalparty, VeloPopuli, Vieta, DirtWatts, WattLog.pro, REZVIVO, OpenRadlr and zwoTrainer.
+- More actions are supported with Zwift.
+- Power Lock: one press holds the power you're pushing right now, whatever the road does. Stop pedalling and it lets go, so you don't restart against a wall of resistance.
+- Shimano Di2: choose between E-TUBE channels (recommended: the Di2 never shifts from the paddles, even if BikeControl disconnects) and button mode. Wired levers now work too.
+- Older trainers that predate FTMS, such as the Saris Hammer on older firmware and older Wahoo KICKR models, can now be controlled.
+
+**Fixes**:
+- Windows: the Bluetooth bridge to a phone sends data again and no longer crashes. If a trainer app gets stuck on an old Bluetooth connection, BikeControl tells you to pair again.
+- Android: controllers that drop after a long session are found again.
+- Gamepads you forget stay forgotten after a restart.
+- TrainingPeaks Virtual: the controller no longer keeps spinning after it connects, and two iPhones no longer clash.
+- Target Power no longer feels suddenly very heavy when you slow down on trainers with a slow cadence reading (e.g. Decathlon D500).
+- Virtual speed includes your front chainring.
+- The Windows overlay opens with the opacity and position you saved.
+- Shimano crank power meters are recognised as power meters.
+
 ### 7.4.0 (29-10-2026)
 **Features**:
 - Chain on the trainer: set the chainring and cog your real chain sits on, and every virtual gear feels like its real counterpart.

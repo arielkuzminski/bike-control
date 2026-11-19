@@ -5,6 +5,7 @@ import 'package:bike_control/bluetooth/app_connection_latch.dart';
 import 'package:bike_control/utils/host_platform.dart';
 import 'package:bike_control/bluetooth/devices/openbikecontrol/obc_ble_emulator.dart';
 import 'package:bike_control/bluetooth/devices/openbikecontrol/obc_mdns_emulator.dart';
+import 'package:bike_control/bluetooth/devices/openbikecontrol/obc_gear.dart';
 import 'package:bike_control/bluetooth/devices/openbikecontrol/obc_steering_angle.dart';
 import 'package:bike_control/bluetooth/devices/openbikecontrol/protocol_parser.dart';
 import 'package:bike_control/bluetooth/devices/trainer_connection.dart';
@@ -25,10 +26,13 @@ import 'package:bike_control/services/rides/ride_preferences.dart';
 import 'package:bike_control/services/rides/ride_service.dart';
 import 'package:bike_control/services/rides/ride_sources.dart';
 import 'package:bike_control/services/screen_recording/screen_recording_service.dart';
+import 'package:bike_control/services/obc_haptics/obc_haptics_service.dart';
+import 'package:bike_control/services/obc_haptics/phone_haptic_target.dart';
 import 'package:bike_control/services/shift_feedback/gamepad_shift_haptics.dart';
 import 'package:bike_control/services/shift_feedback/shift_feedback_service.dart';
 import 'package:bike_control/services/shift_feedback/shift_haptics.dart';
 import 'package:bike_control/services/shift_feedback/sound_players/shift_sound_player_factory.dart';
+import 'package:bike_control/services/sensors/pedalling_simulation.dart';
 import 'package:bike_control/services/sensors/sensor_hub.dart';
 import 'package:bike_control/services/shifting_configs_controller.dart';
 import 'package:bike_control/services/workout/trainer_metrics.dart';
@@ -90,7 +94,7 @@ class Core {
   BridgeUsageTracker get bridgeUsageTracker {
     _bridgeUsageTracker ??= BridgeUsageTracker(
       prefs: settings.prefs,
-      dailyLimit: const Duration(minutes: 20),
+      dailyLimit: IAPManager.vsDailyTrialLimit,
     );
     return _bridgeUsageTracker!;
   }
@@ -108,10 +112,22 @@ class Core {
     sinks: () => logic.connectedTrainerConnections.whereType<SteeringAngleSink>(),
     isAllowed: obcSteeringAngleAllowed,
   );
+
+  /// The bridged trainer's virtual gear, as connected OpenBikeControl apps get it.
+  late final obcBridgeGear = BridgeGearPosition(proxies: () => connection.proxyDevices);
+
+  /// Reports [obcBridgeGear] to connected OpenBikeControl apps as `0x03` Gear Set.
+  late final obcGear = ObcGearBroadcaster(
+    sinks: () => logic.connectedTrainerConnections.whereType<GearStateSink>(),
+    position: obcBridgeGear,
+  );
   late final remotePairing = RemotePairing();
   late final remoteKeyboardPairing = RemoteKeyboardPairing();
   late final emulation = EmulationManager();
   late final sensors = SensorHub();
+
+  /// Debug-only fake power/cadence/heart rate, started from the debug menu.
+  late final pedallingSimulation = PedallingSimulation(sensors);
 
   late final mediaKeyHandler = MediaKeyHandler();
 
@@ -122,6 +138,15 @@ class Core {
     haptics: const PlatformShiftHaptics(),
     controllerHaptics: const GamepadShiftHaptics(),
     createSoundPlayer: createShiftSoundPlayer,
+    onError: (context, e, s) => recordError(e, s, context: context),
+  );
+
+  /// Haptic feedback commands from OpenBikeControl apps, played on this phone
+  /// and on connected controllers that can vibrate.
+  late ObcHapticsService obcHaptics = ObcHapticsService(
+    phone: () => PhoneHapticTarget.forPlatform,
+    controllers: () => connection.controllerDevices.whereType<HapticTarget>(),
+    controllerVibrationEnabled: () => settings.isInitialized && settings.getVibrationEnabled(),
     onError: (context, e, s) => recordError(e, s, context: context),
   );
 
@@ -255,6 +280,10 @@ class Permissions {
         BluetoothTurnedOn(),
         NotificationRequirement(),
       ];
+    } else if (Platform.isLinux) {
+      list = [
+        BluetoothTurnedOn(),
+      ];
     } else if (Platform.isAndroid) {
       final deviceInfoPlugin = DeviceInfoPlugin();
       final deviceInfo = await deviceInfoPlugin.androidInfo;
@@ -303,7 +332,7 @@ class CoreLogic {
   bool get showLocalControl {
     return core.settings.getLastTarget()?.connectionType == ConnectionType.local &&
         core.settings.getTrainerApp()?.acceptsSimulatedInput != false &&
-        (HostPlatform.isMacOS || HostPlatform.isWindows || HostPlatform.isAndroid);
+        (HostPlatform.isMacOS || HostPlatform.isWindows || HostPlatform.isLinux || HostPlatform.isAndroid);
   }
 
   bool get canRunAndroidService {

@@ -10,6 +10,7 @@ import 'package:bike_control/services/entitlements_service.dart';
 import 'package:bike_control/utils/analytics/campaign_attributes.dart';
 import 'package:bike_control/utils/analytics/install_referrer_reporter.dart';
 import 'package:bike_control/utils/core.dart';
+import 'package:bike_control/utils/iap/iap_manager.dart' show IAPManager;
 import 'package:bike_control/widgets/ui/toast.dart';
 import 'package:dartx/dartx.dart';
 import 'package:flutter/foundation.dart';
@@ -44,6 +45,23 @@ class RevenueCatService {
   @visibleForTesting
   static bool isPurchasedBuild(int build, {required bool isMacOS}) =>
       build < (isMacOS ? 61 : 58) || (build >= 77 && build < freeAgainFromBuild);
+
+  /// Marketing version of [freeAgainFromBuild] (6.1.0+138).
+  static final Version freeAgainFromVersion = Version(6, 1, 0);
+
+  /// Whether an Apple `originalApplicationVersion` version string (macOS
+  /// receipts carry `CFBundleShortVersionString`) should be treated as having
+  /// purchased the full version. Same eras as [isPurchasedBuild]:
+  ///
+  /// - `< 4.2.0`: old paid era → purchased.
+  /// - `4.2.0..4.3.x`: legacy free + trial window → not purchased.
+  /// - `4.4.0..[freeAgainFromVersion]`: current paid era → purchased.
+  /// - `>= [freeAgainFromVersion]`: free + trial again → not purchased.
+  @visibleForTesting
+  static bool isPurchasedVersion(String version) {
+    final parsed = Version.parse(version);
+    return parsed < Version(4, 2, 0) || (parsed >= Version(4, 4, 0) && parsed < freeAgainFromVersion);
+  }
 
   static const String _trialStartDateKey = 'iap_trial_start_date';
   static const String _purchaseStatusKey = 'iap_purchase_status';
@@ -190,7 +208,7 @@ class RevenueCatService {
       _dailyCommandCount = int.tryParse(commandCount);
 
       if (!isTrialExpired) {
-        setDailyCommandLimit(80);
+        setDailyCommandLimit(IAPManager.trialDailyCommandLimit);
       }
       await setAttributes();
     } catch (e, s) {
@@ -205,6 +223,11 @@ class RevenueCatService {
   }
 
   /// Check if the user has an active entitlement
+  /// Re-reads the store's purchase state into [isPurchasedNotifier].
+  Future<void> recheckPurchase() async {
+    if (_isConfigured) await _checkExistingPurchase();
+  }
+
   Future<void> _checkExistingPurchase() async {
     try {
       final storedStatus = await _prefs.read(key: _syncedPurchasesKey);
@@ -249,7 +272,7 @@ class RevenueCatService {
         core.connection.signalNotification(LogNotification('Apple receipt validated for version: $purchasedVersion'));
         if (purchasedVersion != null && purchasedVersion.contains(".")) {
           final parsedVersion = Version.parse(purchasedVersion);
-          isPurchasedNotifier.value = parsedVersion < Version(4, 2, 0) || parsedVersion >= Version(4, 4, 0);
+          isPurchasedNotifier.value = isPurchasedVersion(purchasedVersion);
           hasPurchasedBefore50 = parsedVersion < Version(5, 0, 0);
         } else {
           final purchasedVersionAsInt = int.tryParse(purchasedVersion.toString()) ?? 1337;
@@ -354,6 +377,38 @@ class RevenueCatService {
     }
   }
 
+  /// The one-time Pro package (`pro_lifetime`) in any offering, or null
+  /// while no offering carries it. The paywall shows the "Pro forever" link
+  /// only once it does, so adding the package in RevenueCat switches it on.
+  static Package? proLifetimePackage(Offerings offerings) {
+    for (final offering in [offerings.all['pro'], offerings.all['proonly'], ...offerings.all.values]) {
+      for (final package in offering?.availablePackages ?? const <Package>[]) {
+        if (SubscriptionTerm.isLifetimeProduct(package.storeProduct.identifier)) return package;
+      }
+    }
+    return null;
+  }
+
+  /// Buy Pro once (`pro_lifetime`), straight from the store sheet.
+  Future<void> purchaseProLifetime() async {
+    final package = proLifetimePackage(await Purchases.getOfferings());
+    if (package == null) {
+      buildToast(title: AppLocalizations.current.subscriptionOfferingUnavailable);
+      return;
+    }
+    try {
+      final result = await Purchases.purchase(PurchaseParams.package(package));
+      core.connection.signalNotification(LogNotification('Purchase result: $result'));
+      await refreshEntitlementsWithRetry();
+    } on PlatformException catch (e, s) {
+      // A rider dismissing the store sheet is expected — never log or toast it.
+      if (PurchasesErrorHelper.getErrorCode(e) != PurchasesErrorCode.purchaseCancelledError) {
+        recordError(e, s, context: 'Purchasing Pro lifetime');
+        buildToast(title: e.message);
+      }
+    }
+  }
+
   /// Purchase the subscription (use paywall instead)
   Future<void> purchaseSubscription(
     BuildContext context, {
@@ -412,6 +467,7 @@ class RevenueCatService {
     // account, leaving the backend without Pro. When RevenueCat says Pro,
     // ask the backend to wait for it, and heal if it still came back empty.
     await _handleCustomerInfoUpdate(result.customerInfo);
+    await _syncStoreToAccountIfEmpty(supabaseUserId, result.customerInfo);
     if (performSync) {
       await _syncSubscriptions(expectActive: isProNotifier.value);
     }
@@ -419,6 +475,45 @@ class RevenueCatService {
       await refreshEntitlementsWithRetry();
     }
   }
+
+  /// The account RevenueCat's store receipts were last re-posted for in this
+  /// launch, see [needsStoreSyncAfterLogin].
+  String? _storeSyncedUserId;
+
+  /// A purchase made (or restored) while signed out can stay on an anonymous
+  /// RevenueCat id: logging in then shows the account without it and the app
+  /// falls back to the trial. Re-posting the store's receipts moves the
+  /// purchase onto the account.
+  Future<void> _syncStoreToAccountIfEmpty(String userId, CustomerInfo customerInfo) async {
+    final active = customerInfo.entitlements.active;
+    if (!needsStoreSyncAfterLogin(
+      userId: userId,
+      hasFullVersion: active[fullVersionEntitlement] != null,
+      hasPro: active[proVersionEntitlement] != null,
+      syncedUserId: _storeSyncedUserId,
+    )) {
+      return;
+    }
+    _storeSyncedUserId = userId;
+    try {
+      await Purchases.syncPurchases();
+      Purchases.invalidateCustomerInfoCache();
+      await _handleCustomerInfoUpdate(await Purchases.getCustomerInfo());
+    } catch (e, s) {
+      recordError(e, s, context: 'Syncing store purchases to the account after login');
+    }
+  }
+
+  /// Whether to re-post the store receipts after logging RevenueCat in as
+  /// [userId]: the account shows neither Base nor Pro, and this launch hasn't
+  /// done it for that account yet.
+  @visibleForTesting
+  static bool needsStoreSyncAfterLogin({
+    required String userId,
+    required bool hasFullVersion,
+    required bool hasPro,
+    required String? syncedUserId,
+  }) => !hasFullVersion && !hasPro && userId != syncedUserId;
 
   Future<void> _syncSubscriptions({required bool expectActive}) =>
       core.supabase.functions.invoke('sync-subscriptions', body: syncSubscriptionsBody(expectActive: expectActive));
@@ -430,8 +525,7 @@ class RevenueCatService {
   static Map<String, dynamic>? syncSubscriptionsBody({required bool expectActive}) =>
       expectActive ? const {'expectActive': true} : null;
 
-  bool get _backendPro =>
-      entitlementsService.hasActive(premiumProductKeyMonthly) || entitlementsService.hasActive(premiumProductKeyYearly);
+  bool get _backendPro => entitlementsService.hasActivePro;
 
   /// Whether the backend must be told to re-read the store: signed into an
   /// account, RevenueCat says Pro, but the account's entitlements don't.

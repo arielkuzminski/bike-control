@@ -4,6 +4,7 @@ import 'dart:isolate';
 import 'dart:ui';
 
 import 'package:bike_control/gen/l10n.dart';
+import 'package:bike_control/main.dart' show recordError;
 import 'package:bike_control/utils/actions/android.dart';
 import 'package:bike_control/utils/core.dart';
 import 'package:bike_control/utils/requirements/platform.dart';
@@ -232,6 +233,9 @@ class NotificationRequirement extends PlatformRequirement {
           appUserModelId: 'OpenBikeControl.BikeControl',
           guid: '00000012-0000-1000-8000-00805f9b34fb',
         ),
+        linux: LinuxInitializationSettings(
+          defaultActionName: 'Open BikeControl',
+        ),
       ),
       onDidReceiveBackgroundNotificationResponse: Platform.isMacOS ? null : notificationTapBackground,
       onDidReceiveNotificationResponse: (n) {
@@ -242,12 +246,43 @@ class NotificationRequirement extends PlatformRequirement {
     );
     // The app was started by tapping a ride's push: open it once the first
     // screen stands.
-    final launch = await core.flutterLocalNotificationsPlugin.getNotificationAppLaunchDetails();
+    // Not implemented on Linux, where a notification can't launch the app.
+    final launch = Platform.isLinux
+        ? null
+        : await core.flutterLocalNotificationsPlugin.getNotificationAppLaunchDetails();
     final payload = launch?.didNotificationLaunchApp == true ? launch?.notificationResponse?.payload : null;
     if (payload != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) => unawaited(openRideFromNotification(payload)));
     }
   }
+
+  /// Closes every connection, drops the keep-alive foreground service and its
+  /// notification, then leaves the app. Popping alone only finishes the
+  /// activity — the service would keep the process and notification alive.
+  static Future<void> closeAndQuit() async {
+    UniversalBle.onAvailabilityChange = null;
+    // A disconnect that hangs or throws must not keep the app and its
+    // notification alive: each step gets a deadline, and quitting goes on.
+    await _quitStep('disconnect all', core.connection.disconnectAll);
+    await _quitStep('action cleanup', () async => core.actionHandler.cleanup());
+    await _quitStep('stop connection', core.connection.stop);
+    if (Platform.isAndroid) {
+      final android = AndroidFlutterLocalNotificationsPlugin();
+      await _quitStep('stop foreground service', android.stopForegroundService);
+      await _quitStep('cancel notifications', android.cancelAll);
+    }
+    await SystemNavigator.pop();
+  }
+
+  static Future<void> _quitStep(String name, Future<void> Function() step) async {
+    try {
+      await step().timeout(_quitStepTimeout);
+    } catch (e, s) {
+      unawaited(recordError(e, s, context: 'close and quit: $name'));
+    }
+  }
+
+  static const _quitStepTimeout = Duration(seconds: 3);
 
   static Future<void> addPersistentNotification() async {
     const String channelGroupId = 'BikeControl';
@@ -275,7 +310,11 @@ class NotificationRequirement extends PlatformRequirement {
       title: channelGroupId,
       body: AppLocalizations.current.allowsRunningInBackground,
       foregroundServiceTypes: {AndroidServiceForegroundType.foregroundServiceTypeConnectedDevice},
-      startType: AndroidServiceStartType.startRedeliverIntent,
+      // Not sticky: when Android kills the process, a redelivered intent restarts
+      // the service in the background, where startForeground is refused
+      // (ForegroundServiceStartNotAllowedException) and the app crashes. A restarted
+      // service has no engine or BLE connections anyway.
+      startType: AndroidServiceStartType.startNotSticky,
       notificationDetails: AndroidNotificationDetails(
         channelGroupId,
         'Keep Alive',
@@ -307,16 +346,13 @@ class NotificationRequirement extends PlatformRequirement {
     final backgroundMessagePort = _receivePort!.asBroadcastStream();
     _sub = backgroundMessagePort.listen((message) {
       print('Background isolate received message: $message');
-      if (message == 'disconnect' || message == 'close') {
+      if (message == 'disconnect') {
         UniversalBle.onAvailabilityChange = null;
         core.connection.disconnectAll();
-      }
-      if (message == 'close') {
-        core.actionHandler.cleanup();
-        core.connection.stop();
-        SystemNavigator.pop();
-        AndroidFlutterLocalNotificationsPlugin().stopForegroundService();
-        AndroidFlutterLocalNotificationsPlugin().cancelAll();
+      } else if (message == 'close') {
+        unawaited(
+          closeAndQuit().catchError((Object e, StackTrace s) => recordError(e, s, context: 'notification close')),
+        );
       }
 
       //exit(0);

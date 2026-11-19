@@ -16,6 +16,7 @@ import 'package:bike_control/services/support_chat_service.dart';
 import 'package:bike_control/services/telemetry_snapshot.dart';
 import 'package:bike_control/utils/actions/base_actions.dart';
 import 'package:bike_control/utils/core.dart';
+import 'package:bike_control/pages/support_chat/widgets/support_intake_form.dart';
 import 'package:bike_control/utils/support/intake_options.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -246,11 +247,40 @@ Future<void> main() async {
       await selectSomethingElseAndContinue(tester);
 
       expect(tester.widget<SupportComposer>(find.byType(SupportComposer)).requireDescription, isTrue);
-      await tester.enterText(find.byType(TextArea), 'hi');
+      await tester.enterText(find.byKey(supportComposerFieldKey), 'hi');
       await tester.pump();
       await tester.tap(find.byIcon(LucideIcons.send));
       await tester.pumpAndSettle();
       expect(fakeHttp.sendMessageRequests, isEmpty, reason: '"hi" says nothing about what is wrong');
+    });
+  });
+
+  group('after the intake', () {
+    testWidgets('Jonas asks the follow-up question, carrying the intake summary', (tester) async {
+      await tester.pumpWidget(app());
+      await tester.pump();
+      await selectSomethingElseAndContinue(tester);
+
+      final question = find.byKey(const ValueKey('support-intake-question'));
+      expect(question, findsOneWidget);
+      expect(find.descendant(of: question, matching: find.text(l10n.supportChatAskWhatHappens)), findsOneWidget);
+      expect(
+        find.descendant(of: question, matching: find.byType(SupportIntakeSummaryChip)),
+        findsOneWidget,
+        reason: 'the summary lives in the question, not as a card above the composer',
+      );
+      expect(find.byType(SupportIntakeSummaryChip), findsOneWidget);
+    });
+
+    testWidgets('editing from the question reopens the intake form', (tester) async {
+      await tester.pumpWidget(app());
+      await tester.pump();
+      await selectSomethingElseAndContinue(tester);
+
+      await tester.tap(find.text(l10n.supportIntakeEdit));
+      await tester.pumpAndSettle();
+      expect(find.text(l10n.supportIntakeTitle), findsOneWidget);
+      expect(find.byKey(const ValueKey('support-intake-question')), findsNothing);
     });
   });
 
@@ -266,7 +296,7 @@ Future<void> main() async {
       await tester.pump();
 
       await selectSomethingElseAndContinue(tester);
-      await tester.enterText(find.byType(TextArea), 'Virtual shifting stops after ten minutes');
+      await tester.enterText(find.byKey(supportComposerFieldKey), 'Virtual shifting stops after ten minutes');
       await tester.pump();
       await tester.tap(find.byIcon(LucideIcons.send));
       await tester.pumpAndSettle();
@@ -286,13 +316,13 @@ Future<void> main() async {
       await tester.pump();
 
       await selectSomethingElseAndContinue(tester);
-      await tester.enterText(find.byType(TextArea), 'please help, nothing pairs');
+      await tester.enterText(find.byKey(supportComposerFieldKey), 'please help, nothing pairs');
       await tester.pump();
       await tester.tap(find.byIcon(LucideIcons.send));
       await tester.pumpAndSettle();
 
       expect(fakeHttp.openChatRequests, isEmpty, reason: 'never reaches the backend without a session');
-      final field = tester.widget<TextArea>(find.byType(TextArea));
+      final field = tester.widget<TextField>(find.byKey(supportComposerFieldKey));
       expect(
         field.controller!.text,
         'please help, nothing pairs',
@@ -322,7 +352,7 @@ Future<void> main() async {
       expect(core.settings.getSupportChatActive(), isFalse);
 
       await selectSomethingElseAndContinue(tester);
-      await tester.enterText(find.byType(TextArea), 'trainer will not pair');
+      await tester.enterText(find.byKey(supportComposerFieldKey), 'trainer will not pair');
       await tester.pump();
       await tester.tap(find.byIcon(LucideIcons.send));
       await tester.pumpAndSettle();
@@ -355,7 +385,7 @@ Future<void> main() async {
 
       expect(find.byKey(const ValueKey('support-account-link-card')), findsNothing);
 
-      await tester.enterText(find.byType(TextArea), 'help please, nothing shifts');
+      await tester.enterText(find.byKey(supportComposerFieldKey), 'help please, nothing shifts');
       await tester.pump();
       await tester.tap(find.byIcon(LucideIcons.send));
       await tester.pumpAndSettle();
@@ -376,7 +406,7 @@ Future<void> main() async {
       await tester.pump();
       await selectSomethingElseAndContinue(tester);
 
-      await tester.enterText(find.byType(TextArea), 'help please, nothing shifts');
+      await tester.enterText(find.byKey(supportComposerFieldKey), 'help please, nothing shifts');
       await tester.pump();
       await tester.tap(find.byIcon(LucideIcons.send));
       await tester.pumpAndSettle();
@@ -393,7 +423,7 @@ Future<void> main() async {
       await tester.pumpWidget(app());
       await tester.pump();
       await selectSomethingElseAndContinue(tester);
-      await tester.enterText(find.byType(TextArea), 'help please, nothing shifts');
+      await tester.enterText(find.byKey(supportComposerFieldKey), 'help please, nothing shifts');
       await tester.pump();
       await tester.tap(find.byIcon(LucideIcons.send));
       await tester.pumpAndSettle();
@@ -402,7 +432,7 @@ Future<void> main() async {
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('support-account-link-card')), findsNothing);
 
-      await tester.enterText(find.byType(TextArea), 'and a follow-up');
+      await tester.enterText(find.byKey(supportComposerFieldKey), 'and a follow-up');
       await tester.pump();
       await tester.tap(find.byIcon(LucideIcons.send));
       await tester.pumpAndSettle();
@@ -424,7 +454,7 @@ Future<void> main() async {
       await tester.pumpAndSettle();
 
       await selectSomethingElseAndContinue(tester);
-      await tester.enterText(find.byType(TextArea), 'hello, my trainer is stuck');
+      await tester.enterText(find.byKey(supportComposerFieldKey), 'hello, my trainer is stuck');
       await tester.pump();
       await tester.tap(find.byIcon(LucideIcons.send));
       await tester.pumpAndSettle();
@@ -437,7 +467,7 @@ Future<void> main() async {
       await tester.pumpWidget(app());
       await tester.pump();
       await selectSomethingElseAndContinue(tester);
-      await tester.enterText(find.byType(TextArea), 'help please, nothing shifts');
+      await tester.enterText(find.byKey(supportComposerFieldKey), 'help please, nothing shifts');
       await tester.pump();
       await tester.tap(find.byIcon(LucideIcons.send));
       await tester.pumpAndSettle();
@@ -477,10 +507,10 @@ Future<void> main() async {
 
       expect(find.text(l10n.supportPinnedContextChip(l10n.supportPinnedNetworkTest)), findsOneWidget);
       // Not prefilled: the composer starts empty, with the describe-the-problem placeholder.
-      expect(tester.widget<TextArea>(find.byType(TextArea)).controller!.text, isEmpty);
+      expect(tester.widget<TextField>(find.byKey(supportComposerFieldKey)).controller!.text, isEmpty);
       expect(find.text(l10n.supportDescribeProblemPlaceholder), findsOneWidget);
 
-      await tester.enterText(find.byType(TextArea), 'MyWhoosh does not find BikeControl');
+      await tester.enterText(find.byKey(supportComposerFieldKey), 'MyWhoosh does not find BikeControl');
       await tester.pump();
       await tester.tap(find.byIcon(LucideIcons.send));
       await tester.pumpAndSettle();

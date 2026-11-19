@@ -28,6 +28,11 @@ on:
         required: false
         default: true
         type: boolean
+      build_linux:
+        description: 'Build for Linux (.deb + AppImage)'
+        required: false
+        default: true
+        type: boolean
 
 env:
   SHOREBIRD_TOKEN: ${{ secrets.SHOREBIRD_TOKEN }}
@@ -120,20 +125,27 @@ jobs:
       - name: Extract latest changelog
         id: changelog
         run: |
-          chmod +x scripts/get_latest_changelog.sh scripts/truncate_release_notes.sh
+          chmod +x scripts/get_latest_changelog.sh scripts/get_play_notes.sh scripts/truncate_release_notes.sh
           mkdir -p whatsnew store_notes
-          ./scripts/get_latest_changelog.sh > /tmp/changelog.txt
           # Store limits are in characters: Play 500, App Store 4000. Truncate by
           # character (not byte) at a line/word boundary so nothing is cut mid-word.
-          ./scripts/truncate_release_notes.sh 500 < /tmp/changelog.txt > /tmp/whatsnew.txt
-          # Kept outside whatsnew/ so the Play upload doesn't pick it up.
-          ./scripts/truncate_release_notes.sh 4000 < /tmp/changelog.txt > store_notes/app_store_release_notes.txt
-          # Both stores keep showing the previous (stale) note for any locale we
-          # don't provide, so ship the same English note to every managed locale.
-          # Keep this list in sync with scripts/prepare_store_screenshots.sh
-          # (ANDROID_LOCALES); iOS locales are handled by the fastlane lane.
+          # Each locale gets its translation from changelog/<lang>.md; a missing
+          # translation falls back to English (the script warns).
+          # Play locales — keep in sync with scripts/prepare_store_screenshots.sh
+          # (ANDROID_LOCALES).
+          # Play gets the short text from changelog/play/<lang>.txt (500-char
+          # limit); without one for this version, the full notes, truncated.
           for loc in en-US de-DE fr-FR es-ES it-IT pl-PL; do
-            cp /tmp/whatsnew.txt "whatsnew/whatsnew-$loc"
+            ./scripts/get_play_notes.sh "${loc%%-*}" | ./scripts/truncate_release_notes.sh 500 > "whatsnew/whatsnew-$loc"
+          done
+          # App Store: one file per listing language; the fastlane lane maps each
+          # App Store locale (de-DE, es-MX, it, ...) to its language's file and
+          # uses en.txt for any other. Kept outside whatsnew/ so the Play upload
+          # doesn't pick them up.
+          mkdir -p store_notes/app_store
+          for lang in en de fr es it pl; do
+            # --apple: Apple rejects notes that mention other platforms.
+            ./scripts/get_latest_changelog.sh "$lang" --apple | ./scripts/truncate_release_notes.sh 4000 > "store_notes/app_store/$lang.txt"
           done
           # Marketing version (without the +build) for the App Store release-notes push.
           version=$(grep '^version: ' pubspec.yaml | cut -d ' ' -f 2 | tr -d '\r')
@@ -183,7 +195,7 @@ jobs:
         env:
           APPSTORE_API_KEY: ${{ secrets.APPSTORE_API_KEY }}
           APPSTORE_API_ISSUER_ID: ${{ secrets.APPSTORE_API_ISSUER_ID }}
-          RELEASE_NOTES_PATH: ${{ github.workspace }}/store_notes/app_store_release_notes.txt
+          RELEASE_NOTES_DIR: ${{ github.workspace }}/store_notes/app_store
           APP_STORE_VERSION: ${{ env.APP_STORE_VERSION }}
         run: bundle exec fastlane upload_release_notes_macos
 
@@ -196,7 +208,7 @@ jobs:
           xcrun altool --upload-app -f build/ios/ipa/swift_play.ipa -t ios --apiKey "$APPSTORE_API_KEY" --apiIssuer "$APPSTORE_API_ISSUER_ID";
 
       # altool ships the binary but can't set "What's New"; deliver pushes the
-      # English changelog to every managed App Store locale (see the fastlane
+      # translated changelog to every managed App Store locale (see the fastlane
       # lane). Best-effort so it can't break the binary release.
       - name: Push iOS App Store release notes (all locales)
         if: inputs.build_ios
@@ -205,7 +217,7 @@ jobs:
         env:
           APPSTORE_API_KEY: ${{ secrets.APPSTORE_API_KEY }}
           APPSTORE_API_ISSUER_ID: ${{ secrets.APPSTORE_API_ISSUER_ID }}
-          RELEASE_NOTES_PATH: ${{ github.workspace }}/store_notes/app_store_release_notes.txt
+          RELEASE_NOTES_DIR: ${{ github.workspace }}/store_notes/app_store
           APP_STORE_VERSION: ${{ env.APP_STORE_VERSION }}
         run: bundle exec fastlane upload_release_notes
 
@@ -219,14 +231,16 @@ jobs:
           echo "VERSION=$version" >> $GITHUB_ENV
 
       - name: Zip Symbols
-        run: zip -P "${{ secrets.ZIP_PASSWORD }}" -r symbols.zip symbols/
+        if: inputs.build_mac || inputs.build_android || inputs.build_ios
+        run: zip -r symbols.zip symbols/
 
       - name: Upload Symbols
-        uses: actions/upload-artifact@v4
+        if: inputs.build_mac || inputs.build_android || inputs.build_ios
+        uses: ./.github/actions/upload-symbols
         with:
-          overwrite: true
-          name: Symbols
-          path: symbols.zip
+          file: symbols.zip
+          name: release-apple-android.zip
+          token: ${{ secrets.SYMBOLS_UPLOAD_TOKEN }}
 
         #13 Create Release
       - name: Create Release
@@ -238,12 +252,15 @@ jobs:
           prerelease: true
           bodyFile: /tmp/release_body.md
           tag: v${{ env.VERSION }}
-          token: ${{ secrets.TOKEN }}
+          token: ${{ github.token }}
 
   windows:
     if: inputs.build_windows
     name: Build & Release on Windows
     runs-on: windows-2025
+
+    permissions:
+      contents: write
 
     steps:
       #1 Checkout Repository
@@ -343,14 +360,14 @@ jobs:
       - name: Zip Windows Symbols
         shell: pwsh
         run: |
-          7z a -p"${{ secrets.ZIP_PASSWORD }}" symbols-win.zip symbols-win/ build/windows/x64/runner/Release/*.pdb
+          7z a symbols-win.zip symbols-win/ build/windows/x64/runner/Release/*.pdb
 
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+      - name: Upload Windows Symbols
+        uses: ./.github/actions/upload-symbols
         with:
-          overwrite: true
-          name: Windows Symbols
-          path: symbols-win.zip
+          file: symbols-win.zip
+          name: release-windows.zip
+          token: ${{ secrets.SYMBOLS_UPLOAD_TOKEN }}
 
       - name: Create Release (Windows zip)
         if: inputs.build_github
@@ -361,4 +378,175 @@ jobs:
           prerelease: true
           replacesArtifacts: false
           tag: v${{ env.VERSION }}
-          token: ${{ secrets.TOKEN }}
+          token: ${{ github.token }}
+
+  linux:
+    if: inputs.build_linux
+    name: Build on Linux (${{ matrix.arch }})
+    # 22.04 (glibc 2.35): what the bundle is built against is the oldest system
+    # it runs on — Ubuntu 22.04+, Debian 12+, Mint 21+ and current rolling
+    # distros. A 24.04 build needs glibc 2.38 and fails to start on Debian 12.
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-22.04
+            deb_arch: amd64
+            appimage_arch: x86_64
+            shorebird: true
+          # Plain Flutter build: no Shorebird patches on arm64.
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+            deb_arch: arm64
+            appimage_arch: aarch64
+            shorebird: false
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.PAT_TOKEN }}
+
+      - name: Rename pubspec_overrides_ci.yaml to pubspec_overrides.yaml
+        uses: ./.github/actions/rename-pubspec-overrides
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          # The runner image ships libunwind-14-dev, which conflicts with the
+          # libunwind-dev that libgstreamer1.0-dev needs.
+          sudo apt-get remove -y libunwind-14-dev || true
+          sudo apt-get install -y --no-install-recommends clang cmake ninja-build pkg-config \
+            libgtk-3-dev liblzma-dev libstdc++-12-dev libasound2-dev libpulse-dev libsecret-1-dev \
+            libayatana-appindicator3-dev libnotify-dev libkeybinder-3.0-dev libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev libsqlite3-dev libudev-dev libevdev-dev
+
+      - name: Extract version from pubspec.yaml
+        run: |
+          version=$(grep '^version: ' pubspec.yaml | cut -d ' ' -f 2 | tr -d '\r')
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: 🐦 Setup Shorebird
+        if: matrix.shorebird
+        uses: shorebirdtech/setup-shorebird@v1
+        with:
+          cache: true
+
+      - name: Set Up Flutter
+        if: matrix.shorebird
+        uses: ./.github/actions/setup-flutter
+
+      # Flutter publishes no Linux arm64 SDK download, so the setup action
+      # can't install one there: use the stable branch from git.
+      - name: Set Up Flutter (arm64)
+        if: ${{ !matrix.shorebird }}
+        run: |
+          git clone --depth 1 --branch stable https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
+
+      - name: Generate translation files (arm64)
+        if: ${{ !matrix.shorebird }}
+        run: |
+          flutter config --no-analytics
+          flutter pub global activate intl_utils
+          flutter pub global run intl_utils:generate
+
+      - name: 🚀 Shorebird Release Linux
+        if: matrix.shorebird
+        uses: shorebirdtech/shorebird-release@v1
+        with:
+          flutter-version: latest
+          platform: linux
+          args: "--obfuscate --split-debug-info=symbols-linux -- --dart-define=SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}"
+
+      - name: Flutter build Linux
+        if: ${{ !matrix.shorebird }}
+        run: flutter build linux --release --obfuscate --split-debug-info=symbols-linux --dart-define=SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}
+
+      - name: Package .deb and AppImage
+        run: |
+          bundle=build/linux/${{ matrix.arch }}/release/bundle
+          linux/packaging/build_deb.sh "$bundle" "$VERSION" ${{ matrix.deb_arch }} dist
+          linux/packaging/build_appimage.sh "$bundle" "$VERSION" ${{ matrix.appimage_arch }} dist
+
+      - name: Upload Linux packages
+        uses: actions/upload-artifact@v4
+        with:
+          overwrite: true
+          name: Linux ${{ matrix.arch }}
+          path: dist/*
+
+      - name: Zip Linux Symbols
+        run: zip -r symbols-linux-${{ matrix.arch }}.zip symbols-linux/
+
+      - name: Upload Linux Symbols
+        uses: ./.github/actions/upload-symbols
+        with:
+          file: symbols-linux-${{ matrix.arch }}.zip
+          name: release-linux-${{ matrix.arch }}.zip
+          token: ${{ secrets.SYMBOLS_UPLOAD_TOKEN }}
+
+  linux_publish:
+    if: inputs.build_linux && inputs.build_github
+    name: Publish Linux packages
+    needs: linux
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Extract version from pubspec.yaml
+        run: |
+          version=$(grep '^version: ' pubspec.yaml | cut -d ' ' -f 2 | tr -d '\r')
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Download Linux packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: Linux *64
+          merge-multiple: true
+          path: dist
+
+      # What the app's update check compares against (without the build number:
+      # patches within a version come through Shorebird).
+      - name: Write VERSION.txt
+        run: echo "${VERSION%%+*}" > dist/VERSION.txt
+
+      - name: Add to the version's release
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: "dist/*.deb,dist/*.AppImage"
+          allowUpdates: true
+          prerelease: true
+          omitBodyDuringUpdate: true
+          replacesArtifacts: false
+          tag: v${{ env.VERSION }}
+          token: ${{ github.token }}
+
+      # Fixed file names under a fixed tag, so the download links on the
+      # website and the app's update check never change.
+      - name: Update the rolling linux-latest release
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: "dist/*.deb,dist/*.AppImage,dist/VERSION.txt"
+          allowUpdates: true
+          replacesArtifacts: true
+          removeArtifacts: true
+          makeLatest: false
+          name: BikeControl for Linux
+          body: |
+            BikeControl ${{ env.VERSION }} for Linux.
+
+            - **Ubuntu, Debian, Mint, Pop!_OS:** the `.deb` (`amd64` for most PCs, `arm64` for ARM). Install with `sudo apt install ./BikeControl-linux-amd64.deb`.
+            - **Everything else:** the AppImage. Make it executable and run it.
+
+            The Local connection method needs write access to `/dev/uinput`. The `.deb` sets that up; with the AppImage, BikeControl shows the one-line udev rule to add.
+          commit: ${{ github.sha }}
+          tag: linux-latest
+          token: ${{ github.token }}

@@ -87,7 +87,9 @@ abstract class BaseActions {
       // TODO support multiple screens
       final Size displaySize;
       final double devicePixelRatio;
-      if (Platform.isWindows) {
+      if (Platform.isWindows || Platform.isLinux) {
+        // Linux: the embedder reports no display size; screen_retriever gives the
+        // primary monitor in logical pixels, which is what the uinput pointer expects.
         // TODO remove once https://github.com/flutter/flutter/pull/164460 is available in stable
         final display = await screenRetriever.getPrimaryDisplay();
         displaySize = display.size;
@@ -178,7 +180,7 @@ abstract class BaseActions {
   ///
   /// Two ways a free tester's shift earns its exemption:
   ///
-  /// * [bridgeCountingDown] — the 20-minute virtual-shifting budget is already
+  /// * [bridgeCountingDown] — the daily virtual-shifting budget is already
   ///   ticking, so the shift is being paid for out of that budget and charging
   ///   the daily command count as well would bill it twice.
   /// * [appHoldsBridge] is false — the bridge is running but no trainer app has
@@ -200,6 +202,26 @@ abstract class BaseActions {
     if (!handledInternally) return false;
     if (isProForDevice || hasFullVersion) return false;
     return bridgeCountingDown || !appHoldsBridge;
+  }
+
+  /// Whether a press still goes through once the daily command limit is used
+  /// up: a trainer action (a gear change, …) while the virtual-shifting budget
+  /// is counting down. Those run on the daily virtual-shifting budget instead — see
+  /// [isExemptInternalTrainerAction] — so the command limit must not cut the
+  /// trial short. Pure for testability.
+  @visibleForTesting
+  static bool passesCommandLimit({required InGameAction? action, required bool bridgeCountingDown}) {
+    if (!bridgeCountingDown) return false;
+    return action != InGameAction.workoutPauseResume && trainerActions.contains(action);
+  }
+
+  /// [passesCommandLimit] for [button] pressed with [trigger], from the live
+  /// keymap and virtual-shifting budget.
+  bool passesCommandLimitFor(ControllerButton button, {required ButtonTrigger trigger}) {
+    return passesCommandLimit(
+      action: supportedApp?.keymap.getKeyPair(button, trigger: trigger)?.inGameAction,
+      bridgeCountingDown: core.bridgeUsageTracker.isCountingDown,
+    );
   }
 
   /// Reads the live entitlement / bridge state and decides whether the daily
@@ -425,7 +447,7 @@ abstract class BaseActions {
           );
         }
         final result = proxy.handleTrainerAction(keyPair.buttons.firstOrNull ?? button, keyPair.inGameAction!);
-        // Free testers changing gears on the bridge during their 20-minute
+        // Free testers changing gears on the bridge during their daily virtual-shifting
         // window don't spend their daily command budget on actions the active
         // FitnessBikeDefinition handles internally — see
         // [isExemptInternalTrainerAction].

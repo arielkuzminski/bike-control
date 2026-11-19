@@ -27,6 +27,7 @@ import 'package:bike_control/widgets/ui/pro_badge.dart';
 import 'package:bike_control/widgets/ui/toast.dart';
 import 'package:bike_control/widgets/ui/type_scale.dart';
 import 'package:flutter/foundation.dart' show ValueListenable, defaultTargetPlatform;
+import 'package:bike_control/widgets/changelog/whats_new.dart';
 import 'package:bike_control/pages/activity/rides_view.dart' show RidesMenuButton;
 import 'package:flutter/rendering.dart'
     show
@@ -487,7 +488,8 @@ class ShellTopBar extends StatelessWidget {
   /// The session's log, for Activity's Clear.
   final ActivityLogController? activity;
 
-  /// The phone's large title and icon-only update action — below 840.
+  /// The phone's large title, with the update strip under the bar instead of
+  /// a button in it — below 840.
   final bool compact;
 
   /// The plan badge and the (?) Help icon — below 840, where there is no
@@ -535,7 +537,7 @@ class ShellTopBar extends StatelessWidget {
             builder: (context, tab, _) =>
                 tab == ActivityTab.log ? ActivityClearButton(controller: activity!) : const SizedBox.shrink(),
           ),
-        AppUpdateButton(compact: compact),
+        if (!compact) const AppUpdateButton(),
         if (showPlanAndHelp) const PlanBadge(),
         if (showPlanAndHelp) const HelpButton(),
         // The bar's one ⋮: the section's own entries (Rides: "Alle löschen")
@@ -550,24 +552,29 @@ class ShellTopBar extends StatelessWidget {
       ],
     );
     final scrolled = this.scrolled;
-    if (scrolled == null) return bar;
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         bar,
-        ValueListenableBuilder<bool>(
-          valueListenable: scrolled,
-          builder: (context, isScrolled, _) => AnimatedOpacity(
-            opacity: isScrolled ? 1 : 0,
-            duration: const Duration(milliseconds: 150),
-            child: Container(
-              key: const ValueKey('shell-top-bar-separator'),
-              height: 1,
-              color: Theme.of(context).colorScheme.border,
+        // A waiting update on the phone: a strip under the bar, which has no
+        // room for a labelled button beside the title.
+        if (compact) const AppUpdateButton(banner: true),
+        // An update's notes, unread: until opened or dismissed.
+        WhatsNewBanner(horizontalMargin: phone ? 16 : 24),
+        if (scrolled != null)
+          ValueListenableBuilder<bool>(
+            valueListenable: scrolled,
+            builder: (context, isScrolled, _) => AnimatedOpacity(
+              opacity: isScrolled ? 1 : 0,
+              duration: const Duration(milliseconds: 150),
+              child: Container(
+                key: const ValueKey('shell-top-bar-separator'),
+                height: 1,
+                color: Theme.of(context).colorScheme.border,
+              ),
             ),
           ),
-        ),
       ],
     );
   }

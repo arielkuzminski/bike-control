@@ -1,6 +1,9 @@
+import 'package:bike_control/bluetooth/devices/zwift/ride_controller_press.dart';
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:bike_control/bluetooth/devices/bluetooth_device.dart';
+import 'package:bike_control/bluetooth/devices/proxy/stale_bluetooth_link_watch.dart';
 import 'package:bike_control/bluetooth/devices/proxy/vs_trial_rules.dart';
 import 'package:bike_control/bluetooth/devices/zwift/constants.dart';
 import 'package:bike_control/bluetooth/devices/zwift/zwift_clickv2.dart';
@@ -14,8 +17,10 @@ import 'package:bike_control/utils/actions/base_actions.dart';
 import 'package:bike_control/utils/ble_device_ids.dart';
 import 'package:bike_control/models/shifting_config.dart';
 import 'package:bike_control/utils/core.dart';
+import 'package:bike_control/utils/vs_trial_copy.dart';
 import 'package:bike_control/utils/erg_power_stepping.dart';
 import 'package:bike_control/utils/gear_readout.dart';
+import 'package:bike_control/utils/host_platform.dart';
 import 'package:bike_control/utils/iap/iap_manager.dart';
 import 'package:bike_control/utils/keymap/apps/rouvy.dart';
 import 'package:bike_control/utils/keymap/apps/supported_app.dart' show SupportedApp, TrainerConnectionType;
@@ -98,7 +103,14 @@ class ProxyDevice extends BluetoothDevice {
   /// the rider, and calling that "connected" is technically true and useless.
   /// Onboarding has always drawn the line here; this getter is that line, in
   /// one place, so onboarding and the home screen cannot drift apart.
-  bool get isBridged => _isStartedN.value || _isConnectedN.value;
+  ///
+  /// In the VS modes the mirrored emulator is the shared [ftmsEmulator], so
+  /// its state only speaks for this trainer while this trainer's definition is
+  /// attached to it. Otherwise an idle twin of the trainer being bridged (same
+  /// trainer, found over WiFi and Bluetooth, sharing its saved retrofit mode)
+  /// reads as bridged too.
+  bool get isBridged =>
+      (_isStartedN.value || _isConnectedN.value) && (_retrofitModeN.value == RetrofitMode.proxy || _fbd != null);
 
   /// A compact, plain-text readout of what the trainer is reporting right now
   /// — "250 W · 90 rpm · gear 12/24" — for places that want one line rather
@@ -149,8 +161,14 @@ class ProxyDevice extends BluetoothDevice {
 
   /// The [FitnessBikeDefinition] for this trainer while in VS mode. Attached
   /// to [ftmsEmulator]'s composite while VS is active; null in proxy mode.
-  FitnessBikeDefinition? _fbd;
+  final ValueNotifier<FitnessBikeDefinition?> _fbdN = ValueNotifier(null);
+  FitnessBikeDefinition? get _fbd => _fbdN.value;
+  set _fbd(FitnessBikeDefinition? fbd) => _fbdN.value = fbd;
   FitnessBikeDefinition? get fitnessBike => _fbd;
+
+  /// [fitnessBike], for listeners that follow it across VS ↔ proxy switches
+  /// and reconnects.
+  ValueListenable<FitnessBikeDefinition?> get fitnessBikeListenable => _fbdN;
 
   /// The rider's active shifting config for this trainer. Without a saved one
   /// it carries the mode the definition runs ([_seedFitnessBikeDefinition]
@@ -232,7 +250,43 @@ class ProxyDevice extends BluetoothDevice {
     _proxyEmulator.shouldAdvertise = () => !_isBridgeTrialOver;
     _proxyEmulator.deviceName = () => scanResult.name;
     _rebindEmulatorState();
+    // The wrappers outlive emulator swaps and reconnects, so these listeners
+    // are added once, for the device's lifetime.
+    _isStartedN.addListener(_syncStaleLinkWatch);
+    _isConnectedN.addListener(_syncStaleLinkWatch);
+    _retrofitModeN.addListener(_syncStaleLinkWatch);
   }
+
+  late final StaleBluetoothLinkWatch _staleLinkWatch = StaleBluetoothLinkWatch(
+    pairedBefore: core.settings.getBluetoothBridgePairedBefore,
+    onPaired: () => unawaited(
+      core.settings.setBluetoothBridgePairedBefore().catchError(
+        (Object e, StackTrace s) => recordError(e, s, context: 'ProxyDevice.staleLinkWatch'),
+      ),
+    ),
+  )..suspected.addListener(_logStaleLink);
+
+  /// Into the support bundle: a rider reporting "no data after a restart"
+  /// should show that the re-pair hint was up.
+  void _logStaleLink() {
+    if (_staleLinkWatch.suspected.value) {
+      Logger.event(
+        'Bluetooth bridge: no trainer app picked it up within '
+        '${_staleLinkWatch.grace.inSeconds} s of starting, though one has before; '
+        'showing the re-pair hint (likely a stale connection, GH #451)',
+      );
+    }
+  }
+
+  /// Whether the trainer app is probably holding a Bluetooth connection from
+  /// before BikeControl restarted, and needs the PC removed and paired again —
+  /// Windows only, see [StaleBluetoothLinkWatch].
+  ValueListenable<bool> get staleBluetoothLinkSuspected => _staleLinkWatch.suspected;
+
+  void _syncStaleLinkWatch() => _staleLinkWatch.update(
+    bridgeUp: HostPlatform.isWindows && _retrofitModeN.value == RetrofitMode.bluetooth && isBridged,
+    appHolds: _isConnectedN.value,
+  );
 
   /// Test-only: drive the device-level "trainer app connected" wrapper
   /// directly, without running the active emulator's connect machinery (whose
@@ -383,7 +437,7 @@ class ProxyDevice extends BluetoothDevice {
   }
 
   /// True when the current retrofit mode needs a Bridge transport (wifi /
-  /// bluetooth) but the non-Pro user has already burned today's 20-minute
+  /// bluetooth) but the non-Pro user has already burned today's
   /// budget. Proxy mode is unaffected.
   bool get _isBridgeTrialOver => isBridgeTrialOver;
 
@@ -393,6 +447,15 @@ class ProxyDevice extends BluetoothDevice {
     mode: _retrofitModeN.value,
     isPro: IAPManager.instance.isProEnabledForCurrentDevice,
     exhausted: core.bridgeUsageTracker.isExhausted,
+  );
+
+  /// [trainerConnectGate] for connecting this trainer in [mode], with the
+  /// live entitlement and today's virtual shifting budget.
+  static TrainerConnectGate trainerConnectGateFor(RetrofitMode mode) => trainerConnectGate(
+    mode: mode,
+    isPro: IAPManager.instance.isProEnabledForCurrentDevice,
+    trialExpired: IAPManager.instance.isTrialExpired,
+    vsBudgetExhausted: core.bridgeUsageTracker.isExhausted,
   );
 
   /// A couple of minutes before the daily budget runs out, while it is
@@ -407,8 +470,9 @@ class ProxyDevice extends BluetoothDevice {
     _trialHeadsUpDay = today;
     // Rounded up: with 1:30 left, "2 minutes" is the honest reading.
     final minutes = (remaining.inSeconds / 60).ceil();
-    final title = AppLocalizations.current.bridgeTrialEndingSoonTitle(minutes);
-    final body = AppLocalizations.current.bridgeTrialEndingSoonBody;
+    final copy = VsTrialCopy.current(AppLocalizations.current);
+    final title = copy.endingSoonTitle(minutes);
+    final body = copy.endingSoonBody;
     core.connection.signalNotification(AlertNotification(LogLevel.LOGLEVEL_INFO, '$title — $body'));
     _showTrialNotification(id: 1341, title: title, body: body);
   }
@@ -417,10 +481,9 @@ class ProxyDevice extends BluetoothDevice {
   /// keeps its connection, so the ride goes on. Otherwise the trainer just
   /// connected with the budget already gone, and the app won't find it.
   void _announceBridgeTrialOver({required bool midRide}) {
-    final title = AppLocalizations.current.bridgeTrialTimeOverTitle;
-    final body = midRide
-        ? AppLocalizations.current.bridgeTrialTimeOverBody
-        : AppLocalizations.current.bridgeTrialAlreadyOverBody;
+    final copy = VsTrialCopy.current(AppLocalizations.current);
+    final title = copy.overTitle;
+    final body = midRide ? copy.overMidRideBody : copy.alreadyOverBody;
     core.connection.signalNotification(
       AlertNotification(LogLevel.LOGLEVEL_WARNING, '$title — $body'),
     );
@@ -452,7 +515,7 @@ class ProxyDevice extends BluetoothDevice {
       transport: transport,
     );
 
-    _zwiftControllerEmulator = ZwiftEmulatorDefinition(device: device);
+    _zwiftControllerEmulator = ZwiftEmulatorDefinition(device: device, asRide: () => RideControllerPress.emulatesRide);
 
     final fbd = FitnessBikeDefinition(
       connectedDevice: scanResult,
@@ -542,10 +605,31 @@ class ProxyDevice extends BluetoothDevice {
   /// bind the same way for the same app.
   static bool needsIPv4For(SupportedApp? app) => app is Rouvy;
 
-  /// Mirrors `emulator.advertisementName`. Exposed on ProxyDevice for the UI
-  /// so it doesn't have to dereference through the contextual `emulator`
-  /// getter.
-  String get advertisementName => emulator.advertisementName;
+  /// The entry a rider picks in their trainer app — what the UI tells them to
+  /// look for. Usually `emulator.advertisementName`; exposed on ProxyDevice so
+  /// the UI doesn't dereference through the contextual `emulator` getter.
+  String get advertisementName => listedNameFor(
+    advertised: emulator.advertisementName,
+    mode: _retrofitModeN.value,
+    isWindows: HostPlatform.isWindows,
+    computerName: HostPlatform.isWindows ? Platform.localHostname : null,
+  );
+
+  /// What the trainer app lists the bridge as. Windows can't put a name in a
+  /// Bluetooth advertisement, so over Bluetooth a phone lists the PC under its
+  /// own name — the computer name unless the rider renamed it — never
+  /// `<trainer> - BikeControl` (GH #451). Over WiFi the advertised name holds.
+  @visibleForTesting
+  static String listedNameFor({
+    required String advertised,
+    required RetrofitMode mode,
+    required bool isWindows,
+    required String? computerName,
+  }) {
+    if (!isWindows || mode != RetrofitMode.bluetooth) return advertised;
+    if (computerName == null || computerName.trim().isEmpty) return advertised;
+    return computerName.trim();
+  }
 
   /// The bridge's TXT record for the selected trainer app. Passed to the
   /// emulator as a builder, so a re-advertise after an app change picks up
@@ -624,6 +708,10 @@ class ProxyDevice extends BluetoothDevice {
     def.setPowerAt30KphW(cfg.powerAt30KphW);
     def.setRealChainRatio(cfg.realChainRatio);
     def.setErgPreferences(stepW: cfg.ergStepW, startSource: cfg.ergStartSource);
+    def.setPowerLockAutoRelease(cfg.powerLockAutoRelease);
+    def.onPowerLockReleased = () => core.connection.signalNotification(
+      AlertNotification(LogLevel.LOGLEVEL_INFO, AppLocalizations.current.powerLockReleased),
+    );
     // A rider who saved a config chose their mode; honour it. With no saved
     // config, let the definition manage the capability-based default (Track
     // Resistance on a grade-capable trainer) rather than the generic Target
@@ -922,6 +1010,20 @@ class ProxyDevice extends BluetoothDevice {
   /// created lazily per TCP client — the details page rehydrates on mount.
   String get trainerKey => scanResult.name ?? scanResult.deviceId;
 
+  /// What [Connection.twinOf] compares: the physical trainer behind this
+  /// entry, whichever transport found it. Usually the [trainerKey] itself;
+  /// Elite advertises only the model over Bluetooth ("RIVO") but brand,
+  /// model, serial and a trailing W over DirCon ("ELITE RIVO 00016 W"), so
+  /// that form is cut back to the model.
+  String get twinKey {
+    final name = scanResult.name;
+    if (name == null) return scanResult.deviceId;
+    final normalized = name.toUpperCase().replaceAll(RegExp(r'[-_\s]+'), ' ').trim();
+    return _eliteDirconName.firstMatch(normalized)?.group(1) ?? normalized;
+  }
+
+  static final _eliteDirconName = RegExp(r'^ELITE (.+) \d+ W$');
+
   /// Whether the underlying device looks like a smart trainer (FTMS-capable
   /// or FE-C-over-BLE). Power-meter-only or HR-only devices have no trainer
   /// commands to drive, so Virtual Shifting is meaningless for them — they
@@ -947,9 +1049,28 @@ class ProxyDevice extends BluetoothDevice {
     };
   }
 
+  /// Whether [app] can find a trainer over WiFi at all — the Virtual Shifting
+  /// WiFi bridge or WiFi Proxy. False for apps that pair trainers over
+  /// Bluetooth only (e.g. Biketerra); true when no app is picked yet.
+  static bool appTakesTrainerOverWifi(SupportedApp? app) {
+    final transports = app?.virtualShiftingTransports;
+    return transports == null || transports.isEmpty || transports.contains(TrainerConnectionType.wifi);
+  }
+
   /// The rider's saved mode for this trainer, else [defaultRetrofitMode] —
-  /// as stored, before the same-device rule below.
-  RetrofitMode get _storedRetrofitMode => core.settings.getRetrofitMode(trainerKey, fallback: defaultRetrofitMode);
+  /// before the same-device rule below. A WiFi mode the selected trainer app
+  /// can't find (WiFi bridge or Proxy for a Bluetooth-only app) starts as
+  /// Virtual Shifting over Bluetooth instead; a non-trainer keeps Proxy, as
+  /// it has nothing else to offer.
+  RetrofitMode get _storedRetrofitMode {
+    final stored = core.settings.getRetrofitMode(trainerKey, fallback: defaultRetrofitMode);
+    if (appTakesTrainerOverWifi(core.settings.getTrainerApp())) return stored;
+    return switch (stored) {
+      RetrofitMode.wifi => RetrofitMode.bluetooth,
+      RetrofitMode.proxy when isSmartTrainer => RetrofitMode.bluetooth,
+      _ => stored,
+    };
+  }
 
   /// Whether [savedRetrofitMode] is folding a Bluetooth resolution into WiFi
   /// because the trainer app runs on this same device ([Target.thisDevice]).
@@ -1377,11 +1498,14 @@ class ProxyDevice extends BluetoothDevice {
   }
 
   Future<void> startProxy() async {
-    if (IAPManager.instance.isTrialExpired) {
-      // 5-day trial over, user hasn't purchased — silently refuse the connect.
-      // The UI Connect buttons surface a Go Pro dialog before ever reaching
-      // here; this branch exists as a defensive funnel for the auto-connect
-      // path. Clear auto-connect so the scanner doesn't keep re-firing.
+    if (trainerConnectGateFor(_retrofitModeN.value) == TrainerConnectGate.goPro) {
+      // Proxy mode after the trial period without Pro — silently refuse the
+      // connect. The UI Connect buttons surface a Go Pro dialog before ever
+      // reaching here; this branch exists as a defensive funnel for the
+      // auto-connect path. Clear auto-connect so the scanner doesn't keep
+      // re-firing. Virtual shifting passes: it runs on the daily trial, and
+      // an already used-up budget is handled once connected
+      // ([_syncBridgeTracking]).
       await core.settings.setAutoConnect(trainerKey, false);
       return;
     }

@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:bike_control/utils/auth/account_session.dart';
 import 'package:bike_control/gen/l10n.dart';
+import 'package:bike_control/main.dart' show recordError;
 import 'package:bike_control/models/device_limit_reached_error.dart';
 import 'package:bike_control/models/entitlement.dart';
 import 'package:bike_control/models/subscription_term.dart';
@@ -13,8 +14,12 @@ import 'package:bike_control/services/device_management_service.dart';
 import 'package:bike_control/services/entitlements_service.dart';
 import 'package:bike_control/utils/core.dart';
 import 'package:bike_control/utils/host_platform.dart';
+import 'package:bike_control/utils/iap/entitlement_purchase_sync.dart';
 import 'package:bike_control/utils/iap/revenuecat_service.dart';
+import 'package:bike_control/utils/iap/linux_iap_service.dart';
+import 'package:bike_control/utils/iap/stripe_checkout_flow.dart';
 import 'package:bike_control/utils/iap/windows_iap_service.dart';
+import 'package:bike_control/utils/iap/windows_stripe_service.dart';
 import 'package:bike_control/utils/plan_format.dart';
 import 'package:bike_control/utils/windows_store_environment.dart';
 import 'package:bike_control/widgets/go_pro_dialog.dart';
@@ -40,6 +45,9 @@ enum PurchaseChannel {
   /// The Windows download from the website: Stripe, behind a sign-in.
   windowsDirect,
 
+  /// Linux: Base is free, Pro goes through Stripe behind a sign-in.
+  linuxDirect,
+
   /// No purchases here (the web, tests).
   none;
 
@@ -59,10 +67,22 @@ class IAPManager {
   static const String premiumYearlyProductKey = 'premium_yearly';
   static const String fullVersionProductKey = 'full_version';
   static const String betaAccessProductKey = 'beta_access';
-  static int dailyCommandLimit = 15;
+  /// Button presses a day during the trial period.
+  static const int trialDailyCommandLimit = 120;
+
+  /// Button presses a day once the trial period is over, without Base or Pro.
+  static const int freeDailyCommandLimit = 40;
+
+  /// How long BikeControl's own virtual shifting (Pro) runs a day without Pro.
+  static const Duration vsDailyTrialLimit = Duration(minutes: 30);
+
+  /// Today's button-press limit: [trialDailyCommandLimit] while the trial
+  /// runs, [freeDailyCommandLimit] after it.
+  static int dailyCommandLimit = freeDailyCommandLimit;
 
   RevenueCatService? _revenueCatService;
   WindowsIAPService? _windowsIapService;
+  LinuxIAPService? _linuxIapService;
   StreamSubscription<AuthState>? _authSubscription;
   bool _isInitialized = false;
 
@@ -77,6 +97,18 @@ class IAPManager {
   );
 
   ValueNotifier<bool> isPurchased = ValueNotifier<bool>(false);
+  late final EntitlementPurchaseSync _entitlementPurchase = EntitlementPurchaseSync(
+    isPurchased: isPurchased,
+    recheckOtherSources: () async {
+      try {
+        await _revenueCatService?.recheckPurchase();
+        await _windowsIapService?.recheckPurchase();
+        await _linuxIapService?.initialize();
+      } catch (e, s) {
+        recordError(e, s, context: 'Rechecking purchase after entitlements expired');
+      }
+    },
+  );
   ValueNotifier<bool> isLocalPro = ValueNotifier<bool>(false);
 
   /// The store's own record of the Pro subscription on this device (iOS,
@@ -86,6 +118,19 @@ class IAPManager {
 
   /// The store's page for managing subscriptions, when it gave one.
   String? storeManagementUrl;
+
+  /// The Stripe billing portal on the store builds (iOS, Android, macOS), for
+  /// a subscription bought on the Windows download or on Linux.
+  late final StripeCheckoutFlow _storeBuildStripe = StripeCheckoutFlow(
+    stripe: WindowsStripeService(core.supabase),
+    platform: Platform.operatingSystem,
+    returnUrls: StripeReturnUrls.appLink,
+    loginRequiredBody: (l10n) => l10n.signInToSyncYourSubscriptionAndManageDevices,
+  );
+
+  /// Test-only: stands in for the Stripe billing portal on the store builds.
+  @visibleForTesting
+  Future<bool> Function(BuildContext context)? stripePortalForTesting;
 
   IAPManager._();
 
@@ -132,10 +177,9 @@ class IAPManager {
 
   /// The subscription as the account or the local Pro flag record it, ignoring
   /// [_localPro]. Server-side features gate on this one.
+  /// Uses upstream's [EntitlementsService.hasActivePro], which covers every Pro product.
   bool get hasVerifiedSubscription =>
-      (isLoggedIn && (entitlements.hasActive(premiumMonthlyProductKey)) ||
-          entitlements.hasActive(premiumYearlyProductKey)) ||
-      (!isLoggedIn && isLocalPro.value);
+      (isLoggedIn && entitlements.hasActivePro) || (!isLoggedIn && isLocalPro.value);
 
   bool get hasActiveSubscription => _localPro || hasVerifiedSubscription;
 
@@ -190,9 +234,11 @@ class IAPManager {
     if (fromStore != null) return fromStore;
     Entitlement? latest;
     for (final e in entitlements.current) {
-      if (!e.isActive || (e.productKey != premiumMonthlyProductKey && e.productKey != premiumYearlyProductKey)) {
+      if (!e.isActive || !e.isPro) {
         continue;
       }
+      // Bought once outranks any subscription still running beside it.
+      if (SubscriptionTerm.isLifetimeProduct(e.productKey)) return SubscriptionTerm.fromEntitlement(e);
       if (latest == null || (e.activeUntil?.isAfter(latest.activeUntil ?? DateTime(0)) ?? false)) latest = e;
     }
     return latest == null ? null : SubscriptionTerm.fromEntitlement(latest);
@@ -212,6 +258,7 @@ class IAPManager {
       if (HostPlatform.isAndroid) return PurchaseChannel.playStore;
     }
     if (isWindows) return isOutsideStoreWindowsBuild ? PurchaseChannel.windowsDirect : PurchaseChannel.microsoftStore;
+    if (_linuxIapService != null) return PurchaseChannel.linuxDirect;
     return PurchaseChannel.none;
   }
 
@@ -221,8 +268,7 @@ class IAPManager {
   @visibleForTesting
   set purchaseChannelForTesting(PurchaseChannel? channel) => _purchaseChannelForTesting = channel;
 
-  DateTime? get premiumActiveUntil =>
-      entitlements.activeUntil(premiumMonthlyProductKey) ?? entitlements.activeUntil(premiumYearlyProductKey);
+  DateTime? get premiumActiveUntil => entitlements.proActiveUntil;
 
   /// Initialize the IAP manager.
   Future<void> initialize() async {
@@ -259,12 +305,15 @@ class IAPManager {
           premiumProductKeyYearly: premiumYearlyProductKey,
         );
         await _revenueCatService!.initialize();
+      } else if (Platform.isLinux) {
+        _linuxIapService = LinuxIAPService();
+        await _linuxIapService!.initialize();
       } else {
         throw UnsupportedError('Unsupported platform for IAP: ${Platform.operatingSystem}');
       }
 
       await entitlements.refresh();
-      _syncPurchaseFlagFromEntitlements();
+      await _syncPurchaseFlagFromEntitlements();
       _isInitialized = true;
     } catch (e) {
       debugPrint('Error initializing IAP manager: $e');
@@ -275,13 +324,13 @@ class IAPManager {
   /// Called on app start when a session may already exist.
   Future<void> refreshEntitlementsOnAppStart() async {
     await entitlements.refresh(force: true);
-    _syncPurchaseFlagFromEntitlements();
+    await _syncPurchaseFlagFromEntitlements();
   }
 
   /// Called on app resume to refresh stale entitlement cache.
   Future<void> refreshEntitlementsOnResume() async {
     await entitlements.refresh();
-    _syncPurchaseFlagFromEntitlements();
+    await _syncPurchaseFlagFromEntitlements();
   }
 
   /// Check if the trial period has started.
@@ -317,12 +366,19 @@ class IAPManager {
     return 0;
   }
 
+  bool? _trialExpiredForTesting;
+
+  /// Test-only: force [isTrialExpired] (null restores the real one).
+  @visibleForTesting
+  set trialExpiredForTesting(bool? expired) => _trialExpiredForTesting = expired;
+
   /// Check if the trial has expired.
   bool get isTrialExpired {
     // Before IAP is initialized there is no trial to have expired yet, and the
     // pro/subscription checks below reach into Supabase which isn't wired up
     // until startup completes. Mirror isProEnabledForCurrentDevice's guard.
     if (!_isInitialized) return false;
+    if (_trialExpiredForTesting case final expired?) return expired;
     if (isProEnabled) {
       return false;
     }
@@ -412,6 +468,11 @@ class IAPManager {
 
   /// Purchase the full version.
   Future<void> purchaseFullVersion(BuildContext context, {bool fromPaywall = false}) async {
+    // Base is free on Linux: there is nothing to buy, only Pro to show.
+    if (_linuxIapService != null) {
+      if (!fromPaywall) return _showPaywall(context, true);
+      return;
+    }
     if (isOutsideStoreWindowsBuild) {
       if (!fromPaywall) {
         return _showPaywall(context, false);
@@ -453,8 +514,24 @@ class IAPManager {
         context,
         yearly: plan == SubscriptionPlan.yearly,
       );
+    } else if (_linuxIapService != null) {
+      return _linuxIapService!.purchaseSubscription(
+        context,
+        yearly: plan == SubscriptionPlan.yearly,
+      );
     }
   }
+
+  /// Buy Pro once instead of subscribing. Paywall-only: the store sheet on
+  /// iOS, Android and macOS, Stripe Checkout on Windows and Linux.
+  Future<void> purchaseProLifetime(BuildContext context) async {
+    if (_revenueCatService != null) return _revenueCatService!.purchaseProLifetime();
+    if (_windowsIapService != null) return _windowsIapService!.purchaseProLifetime(context);
+    if (_linuxIapService != null) return _linuxIapService!.purchaseProLifetime(context);
+  }
+
+  /// Pro bought once: nothing renews and nothing is managed.
+  bool get isProLifetime => subscriptionTerm?.isLifetime ?? false;
 
   Future<void> _showPaywall(BuildContext context, bool subscription) async {
     // openDrawer needs a DrawerOverlay ancestor (Scaffold creates one) and does
@@ -487,7 +564,7 @@ class IAPManager {
     if (_revenueCatService != null) {
       restored = await _revenueCatService!.restorePurchases();
     }
-    _syncPurchaseFlagFromEntitlements();
+    await _syncPurchaseFlagFromEntitlements();
     return restored;
   }
 
@@ -504,22 +581,33 @@ class IAPManager {
   bool get isWindowsLoggedIn => _windowsIapService?.isLoggedIn ?? false;
 
   /// Opens where the subscription is managed: the store's subscription
-  /// settings (iOS, Android, macOS) or the Stripe billing portal (Windows).
+  /// settings (iOS, Android, macOS) or the Stripe billing portal (Windows,
+  /// Linux, and a Stripe subscription used on a store build).
   /// Returns false if user has no Stripe customer (should hide button)
   Future<bool> openBillingPortal(BuildContext context) async {
+    if (_windowsIapService == null &&
+        _linuxIapService == null &&
+        subscriptionTerm?.store == SubscriptionStore.billingPortal) {
+      // Bought through Stripe on the computer: the store's subscription
+      // settings know nothing about it.
+      return (stripePortalForTesting ?? _storeBuildStripe.openBillingPortal)(context);
+    }
     if (_revenueCatService != null) {
       return _revenueCatService!.openBillingPortal(context, managementUrl: storeManagementUrl);
     } else if (_windowsIapService != null) {
       return _windowsIapService!.openBillingPortal(context);
+    } else if (_linuxIapService != null) {
+      return _linuxIapService!.openBillingPortal(context);
     } else {
       return false;
     }
   }
 
-  /// Check if user has a Stripe customer record (Windows only)
+  /// Check if user has a Stripe customer record (Windows and Linux)
   Future<bool> hasStripeCustomer() async {
-    if (_windowsIapService == null) return false;
-    return _windowsIapService!.hasStripeCustomer();
+    if (_windowsIapService != null) return _windowsIapService!.hasStripeCustomer();
+    if (_linuxIapService != null) return _linuxIapService!.hasStripeCustomer();
+    return false;
   }
 
   /// Dispose the manager.
@@ -541,7 +629,7 @@ class IAPManager {
     if (_revenueCatService != null) {
       await _revenueCatService!.redeem(purchaseId);
       await entitlements.refresh(force: true);
-      _syncPurchaseFlagFromEntitlements();
+      await _syncPurchaseFlagFromEntitlements();
     }
   }
 
@@ -569,13 +657,14 @@ class IAPManager {
         }
         await _revenueCatService?.setAttributes();
         await entitlements.refresh(force: true);
-        _syncPurchaseFlagFromEntitlements();
+        await _syncPurchaseFlagFromEntitlements();
         // A rider who tapped Buy on the Windows Stripe build while logged out was
         // sent to the login gate; a genuine `signedIn` is our cue to finish the
         // checkout they started. Skip token refreshes / the initial session,
         // which are not a fresh login and would fire on every launch.
         if (event == AuthChangeEvent.signedIn && isLoggedIn) {
           await _windowsIapService?.resumePendingPurchaseAfterLogin(isAlreadyPro: isProEnabled);
+          await _linuxIapService?.resumePendingPurchaseAfterLogin(isAlreadyPro: isProEnabled);
         }
         return;
       case AuthChangeEvent.signedOut:
@@ -587,6 +676,8 @@ class IAPManager {
         // reset isPurchased value
         if (Platform.isWindows) {
           await _windowsIapService?.initialize();
+        } else if (Platform.isLinux) {
+          await _linuxIapService?.initialize();
         } else if (Platform.isIOS || Platform.isMacOS || Platform.isAndroid) {
           await _revenueCatService?.initialize();
         }
@@ -597,16 +688,12 @@ class IAPManager {
   }
 
   void _onEntitlementsChanged() {
-    _syncPurchaseFlagFromEntitlements();
+    unawaited(_syncPurchaseFlagFromEntitlements());
   }
 
-  void _syncPurchaseFlagFromEntitlements() {
-    if (isProEnabled) {
-      isPurchased.value = true;
-    } else if (isOutsideStoreWindowsBuild && entitlements.hasActive(fullVersionProductKey)) {
-      isPurchased.value = true;
-    }
-  }
+  Future<void> _syncPurchaseFlagFromEntitlements() => _entitlementPurchase.sync(
+    entitled: isProEnabled || (isOutsideStoreWindowsBuild && entitlements.hasActive(fullVersionProductKey)),
+  );
 
   /// Registers this device for the account's Pro subscription and refreshes
   /// the entitlements, so [isProEnabledForCurrentDevice] reflects the result.

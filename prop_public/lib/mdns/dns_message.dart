@@ -180,6 +180,30 @@ Uint8List buildDnsResponse({
   return out.toBytes();
 }
 
+/// A standard query carrying [questions]. Each question's QU bit asks for a
+/// unicast answer (RFC 6762 §5.4); sent from a port other than 5353 this is a
+/// legacy-unicast query and the responder answers straight back (§6.7).
+Uint8List buildDnsQuery({required int id, required List<DnsQuestion> questions}) {
+  final out = BytesBuilder(copy: false);
+  void u16(int v) => out.add([(v >> 8) & 0xff, v & 0xff]);
+
+  u16(id);
+  u16(0); // standard query
+  u16(questions.length);
+  u16(0);
+  u16(0);
+  u16(0);
+  for (final q in questions) {
+    out.add(encodeDnsName(q.name));
+    u16(q.type);
+    u16(dnsClassIn | (q.unicastResponse ? 0x8000 : 0));
+  }
+  return out.toBytes();
+}
+
+/// The dotted name [host] as labels, without the empty label of a trailing dot.
+DnsName dnsNameFromString(String host) => host.split('.').where((l) => l.isNotEmpty).toList();
+
 DnsRecord dnsPtr(DnsName name, DnsName target, {int ttl = 4500}) =>
     DnsRecord(name: name, type: dnsTypePtr, ttl: ttl, rdata: encodeDnsName(target));
 

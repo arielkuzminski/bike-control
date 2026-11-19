@@ -3,7 +3,10 @@
 // All concrete protocol values below are FAKE placeholders so the app
 // compiles without exposing the real reverse-engineered constants.
 
+import 'dart:math' show Random;
 import 'dart:typed_data';
+
+import 'package:prop/utils/prefs.dart';
 
 class FtmsMdnsConstants {
   // DirCon result / message codes — placeholder values.
@@ -53,6 +56,23 @@ class BikeControlMdnsMarkers {
   // FAKE placeholder — the real product identifier lives in the full
   // implementation.
   static const tacxProductId = '0';
+
+  static const _installIdKey = 'bikecontrol_install_id';
+  static String? _installId;
+
+  /// A random id for this install, kept across launches once [propPrefs] is
+  /// initialized. Tells two BikeControl installs apart on the same network
+  /// (mDNS instance name, DirCon serial number). Hex, at least 4 characters.
+  static String get installId {
+    final cached = _installId;
+    if (cached != null) return cached;
+    final stored = propPrefs.getString(_installIdKey);
+    if (stored != null && stored.length >= 4) return _installId = stored;
+    final random = Random.secure();
+    final id = List.generate(16, (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0')).join();
+    propPrefs.setString(_installIdKey, id);
+    return _installId = id;
+  }
 
   static const txtFingerprints = {
     macAddress,

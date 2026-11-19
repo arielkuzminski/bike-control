@@ -9,7 +9,7 @@ void main() {
 
   test('click-v2 onboarding strings have complete translations in all languages',
       () {
-    // Read all six arb files and parse as JSON
+    // Read every shipped arb file and parse as JSON
     final arbFiles = {
       'en': File('lib/i10n/intl_en.arb'),
       'de': File('lib/i10n/intl_de.arb'),
@@ -17,6 +17,7 @@ void main() {
       'fr': File('lib/i10n/intl_fr.arb'),
       'it': File('lib/i10n/intl_it.arb'),
       'pl': File('lib/i10n/intl_pl.arb'),
+      'zh': File('lib/i10n/intl_zh.arb'),
     };
 
     final arbMaps = <String, Map<String, dynamic>>{};
@@ -25,20 +26,20 @@ void main() {
       arbMaps[entry.key] = jsonDecode(content);
     }
 
-    // Get the reference set from English (exactly 24 keys)
+    // Get the reference set from English (exactly 27 keys)
     final enKeys = arbMaps['en']!
         .keys
         .where((k) => k.startsWith('clickV2Onboarding_'))
         .toSet();
     expect(
       enKeys.length,
-      24,
+      27,
       reason:
-          'English arb should have exactly 24 clickV2Onboarding_ keys, but has ${enKeys.length}',
+          'English arb should have exactly 27 clickV2Onboarding_ keys, but has ${enKeys.length}',
     );
 
     // Verify all other locales have the same key set
-    for (final locale in ['de', 'es', 'fr', 'it', 'pl']) {
+    for (final locale in ['de', 'es', 'fr', 'it', 'pl', 'zh']) {
       final localeKeys = arbMaps[locale]!
           .keys
           .where((k) => k.startsWith('clickV2Onboarding_'))
@@ -73,7 +74,7 @@ void main() {
   // the key-set and value verification test above.
   test('onboarding strings resolve at runtime in every shipped language',
       () async {
-    for (final code in ['en', 'de', 'es', 'fr', 'it', 'pl']) {
+    for (final code in ['en', 'de', 'es', 'fr', 'it', 'pl', 'zh']) {
       final l10n = await AppLocalizations.load(Locale(code));
       final strings = [
         l10n.clickV2Onboarding_cardTitle,
@@ -82,7 +83,6 @@ void main() {
         l10n.clickV2Onboarding_intro,
         l10n.clickV2Onboarding_whyLink,
         l10n.clickV2Onboarding_rightOnlyTitle,
-        l10n.clickV2Onboarding_rightOnlyPro1,
         l10n.clickV2Onboarding_rightOnlyPro2,
         l10n.clickV2Onboarding_rightOnlyCon1,
         l10n.clickV2Onboarding_rightOnlyCta,
@@ -94,12 +94,16 @@ void main() {
         l10n.clickV2Onboarding_zwiftCta,
         l10n.clickV2Onboarding_alternativesLink,
         l10n.clickV2Onboarding_setUpAgain,
-        l10n.clickV2Onboarding_swipeHint,
-        l10n.clickV2Onboarding_decisionTitle,
-        l10n.clickV2Onboarding_decisionSubtitle,
         l10n.clickV2Onboarding_rightOnlyRecap,
-        l10n.clickV2Onboarding_zwiftRecap,
         l10n.clickV2Onboarding_connectFailed,
+        l10n.clickV2Onboarding_noUnlockTitle,
+        l10n.clickV2Onboarding_noUnlockSummary,
+        l10n.clickV2Onboarding_zwiftSummary,
+        l10n.clickV2Onboarding_leftToggleTitle,
+        l10n.clickV2Onboarding_leftToggleSubtitle,
+        l10n.clickV2Onboarding_leftRestartCon,
+        l10n.clickV2Onboarding_bothCta,
+        l10n.clickV2Onboarding_pickFirst,
       ];
       for (final value in strings) {
         expect(value, isNotEmpty, reason: 'empty string for locale $code');

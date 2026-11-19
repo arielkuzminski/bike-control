@@ -12,7 +12,6 @@ import 'package:bike_control/bluetooth/devices/shimano/shimano_di2.dart';
 import 'package:bike_control/bluetooth/devices/sram/sram_axs.dart';
 import 'package:bike_control/bluetooth/devices/zwift/zwift_clickv2.dart';
 import 'package:bike_control/bluetooth/devices/zwift/zwift_device.dart';
-import 'package:bike_control/bluetooth/devices/zwift/zwift_ride.dart';
 import 'package:bike_control/bluetooth/devices/zwift/zwift_unlock.dart';
 import 'package:bike_control/bluetooth/messages/notification.dart';
 import 'package:bike_control/main.dart';
@@ -65,7 +64,6 @@ import 'package:bike_control/widgets/rides/ride_recording_line.dart';
 import 'package:bike_control/services/workout/workout_recorder.dart';
 import 'package:bike_control/widgets/ui/app_theme.dart' show BkStatusColors;
 import 'package:bike_control/utils/window_size.dart';
-import 'package:bike_control/widgets/zwift_ride_firmware_notice.dart';
 import 'package:bike_control/widgets/zwift_ride_v2_unlock.dart';
 import 'package:bike_control/widgets/ui/connection_method.dart'
     show connectionMethodSummary, enableLocalControl, ensureLocalNetworkAccess;
@@ -315,7 +313,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _connectionListener = core.connection.connectionStream.listen((_) {
       _syncProxyListeners();
       if (mounted) setState(() {});
-      _maybeShowRideFirmwareDialog();
+      _maybeShowRideV2Explainer();
       _maybeOfferSetup();
     });
     _syncProxyListeners();
@@ -370,7 +368,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _settling = startupSettling..addListener(_onSettlingChanged);
     core.connection.isScanning.addListener(_onSettlingChanged);
 
-    _maybeShowRideFirmwareDialog();
+    _maybeShowRideV2Explainer();
     _maybeOfferSetup();
     if (!_isRide) widget.reveal?.addListener(_onRevealRequested);
   }
@@ -409,36 +407,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (mounted) setState(() {});
   }
 
-  /// Once per install, when a Zwift Ride first shows up on server-locked
-  /// firmware (>1.2.0) without being a Zwift Ride V2, surface a one-time dialog
-  /// pointing the rider at support. The persistent card notice in controller
-  /// settings is the standing fallback. A Zwift Ride V2 gets its own one-time
-  /// explainer instead — see [maybeShowZwiftRideV2Explainer].
-  bool _rideFirmwareDialogHandled = false;
+  /// A Zwift Ride V2 gets a one-time explainer — see
+  /// [maybeShowZwiftRideV2Explainer]. One of the two views asks, or a rider
+  /// with both on screen gets it twice.
   bool _rideV2ExplainerPending = false;
 
-  void _maybeShowRideFirmwareDialog() {
-    // One of the two views asks, or a rider with both on screen gets it twice.
-    if (!_isRide) return;
-    _maybeShowRideV2Explainer();
-    if (screenshotMode || _rideFirmwareDialogHandled) return;
-    if (core.settings.getRideFirmwareLockDialogShown()) {
-      _rideFirmwareDialogHandled = true;
-      return;
-    }
-    final affected = core.connection.controllerDevices.firstOrNullWhere(ZwiftRide.hasUnsupportedFirmware);
-    if (affected == null) return;
-    _rideFirmwareDialogHandled = true;
-    unawaited(core.settings.setRideFirmwareLockDialogShown(true));
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) {
-        showZwiftRideFirmwareDialog(context, affected as ZwiftRide);
-      }
-    });
-  }
-
   void _maybeShowRideV2Explainer() {
+    if (!_isRide) return;
     if (screenshotMode || _rideV2ExplainerPending || core.settings.getRideV2ExplainerShown()) return;
+    if (trainerAppUnlocksZwiftControllers()) return;
     final hasRideV2 = core.connection.controllerDevices.any((d) => d.isConnected && d is ZwiftUnlock && d.isRideV2);
     if (!hasRideV2) return;
     _rideV2ExplainerPending = true;
@@ -490,6 +467,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       proxy.isStarting.addListener(_onProxyChanged);
       proxy.isStartedListenable.addListener(_onProxyChanged);
       proxy.isConnectedListenable.addListener(_onProxyChanged);
+      proxy.staleBluetoothLinkSuspected.addListener(_onProxyChanged);
     }
   }
 
@@ -527,6 +505,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       proxy.isStarting.removeListener(_onProxyChanged);
       proxy.isStartedListenable.removeListener(_onProxyChanged);
       proxy.isConnectedListenable.removeListener(_onProxyChanged);
+      proxy.staleBluetoothLinkSuspected.removeListener(_onProxyChanged);
     }
     widget.reveal?.removeListener(_onRevealRequested);
     core.connection.startupReconnecting.removeListener(_onStartupReconnectChanged);
@@ -680,6 +659,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         // isConnectedListenable mirrors emulator.isConnected — the trainer app
         // actually holds the virtual trainer, not just "the bridge is running".
         appHoldsBridge: proxy.isConnectedListenable.value,
+        staleBluetoothLink: proxy.staleBluetoothLinkSuspected.value,
         // The exact entry to look for in the trainer app's device list.
         bridgeName: proxy.advertisementName,
         // And the one beside it not to pick: the trainer under its own name.

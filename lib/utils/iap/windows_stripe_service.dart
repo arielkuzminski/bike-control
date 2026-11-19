@@ -29,7 +29,8 @@ class WindowsStripeService {
 
   /// Start a Stripe Checkout session for purchase
   ///
-  /// [priceId] must be 'monthly', 'yearly', or 'full' (one-time purchase)
+  /// [priceId] must be 'monthly', 'yearly', 'full' (Base, one-time) or
+  /// 'pro_lifetime' (Pro, one-time)
   /// [successUrl] optional, defaults to app origin + '/success'
   /// [cancelUrl] optional, defaults to app origin + '/cancel'
   ///
@@ -37,6 +38,7 @@ class WindowsStripeService {
   Future<void> startCheckout({
     required String priceId,
     required String? storeId,
+    String? platform,
     String? successUrl,
     String? cancelUrl,
   }) async {
@@ -44,8 +46,8 @@ class WindowsStripeService {
       throw StripeException('Authentication required. Please log in to purchase a subscription.');
     }
 
-    if (priceId != 'monthly' && priceId != 'yearly' && priceId != 'full') {
-      throw StripeException('Invalid price_id. Must be "monthly", "yearly", or "full"');
+    if (!const {'monthly', 'yearly', 'full', 'pro_lifetime'}.contains(priceId)) {
+      throw StripeException('Invalid price_id. Must be "monthly", "yearly", "full" or "pro_lifetime"');
     }
 
     try {
@@ -55,6 +57,9 @@ class WindowsStripeService {
 
       if (storeId != null) {
         body['store_id'] = storeId;
+      }
+      if (platform != null) {
+        body['platform'] = platform;
       }
       if (successUrl != null) {
         body['success_url'] = successUrl;

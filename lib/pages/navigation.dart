@@ -22,7 +22,7 @@ import 'package:version/version.dart';
 import '../pages/onboarding/onboarding_page.dart';
 import '../pages/onboarding/onboarding_trigger.dart';
 import '../utils/settings/settings.dart';
-import '../widgets/changelog_dialog.dart';
+import 'package:bike_control/widgets/changelog/whats_new.dart';
 
 class Navigation extends StatefulWidget {
   const Navigation({super.key, this.initialSection = AppSection.ride});
@@ -127,10 +127,8 @@ class _NavigationState extends State<Navigation> {
   /// already-connected devices on mount and for new events on the connection
   /// stream. The caller cancels the stream subscription on the first true.
   bool _tryAutoShowOverlayFor(BaseDevice device) {
-    if (device is! ProxyDevice) return false;
-    if (!device.isSmartTrainer || !device.isConnected) return false;
-    final def = device.fitnessBike;
-    if (def == null) return false;
+    if (device is! ProxyDevice || !trainerOverlayAutoShowReady(device)) return false;
+    final def = device.fitnessBike!;
 
     final controller = TrainerOverlayService.forCurrentPlatform();
     if (controller.isShowing.value) return true;
@@ -184,9 +182,7 @@ class _NavigationState extends State<Navigation> {
         recordError(e, s, context: 'onboarding trigger');
       }
 
-      if (mounted) {
-        await ChangelogDialog.showIfNeeded(context, currentVersion, lastSeenVersion);
-      }
+      await WhatsNew.checkAtLaunch(currentVersion, lastSeenVersion);
 
       // Update last seen version
       await core.settings.setLastSeenVersion(currentVersion);

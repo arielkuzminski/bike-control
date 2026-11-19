@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:bike_control/main.dart' show recordError;
+import 'package:bike_control/services/mdns/mdns_host_resolver.dart';
+import 'package:bike_control/services/mdns/mdns_service_browser.dart';
 import 'package:dartx/dartx.dart';
 import 'package:flutter/foundation.dart';
 import 'package:nsd/nsd.dart' as nsd;
@@ -27,14 +29,22 @@ class WifiTrainer {
 /// scanning: started from Connection.performScanning, stopped from
 /// Connection.stop. Deliberately core-free — callbacks are injected.
 class WifiTrainerScanner {
-  WifiTrainerScanner({required this.onFound, required this.onLost});
+  WifiTrainerScanner({
+    required this.onFound,
+    required this.onLost,
+    MdnsServiceBrowser Function()? createBrowser,
+    Future<String?> Function(String host)? resolveHost,
+  }) : _createBrowser = createBrowser ?? MdnsServiceBrowser.forPlatform,
+       _resolveHost = resolveHost ?? MdnsHostResolver.resolveIPv4;
 
   static const serviceType = '_wahoo-fitness-tnp._tcp';
 
   final void Function(WifiTrainer trainer) onFound;
   final void Function(String deviceId) onLost;
 
-  nsd.Discovery? _discovery;
+  final MdnsServiceBrowser Function() _createBrowser;
+  final Future<String?> Function(String host) _resolveHost;
+  MdnsServiceBrowser? _browser;
   final _known = <String, WifiTrainer>{};
 
   /// Local interface IPs, refreshed on [start] — used for self-exclusion.
@@ -45,29 +55,44 @@ class WifiTrainerScanner {
   /// reappear on the next scan pass.
   Future<void> start() async {
     if (kIsWeb) return;
-    if (_discovery != null) {
+    if (_browser != null) {
       for (final trainer in _known.values.toList()) {
         onFound(trainer);
       }
       return;
     }
+    return _starting ??= _open().whenComplete(() => _starting = null);
+  }
+
+  /// The [start] in progress, so overlapping calls open one browser.
+  Future<void>? _starting;
+
+  /// Bumped by [stop], so a start it overtook doesn't leave a browser running.
+  var _generation = 0;
+
+  Future<void> _open() async {
+    final generation = _generation;
     _localAddresses = await _listLocalAddresses();
-    nsd.disableServiceTypeValidation(true);
-    final discovery = await nsd.startDiscovery(serviceType, autoResolve: true);
-    discovery.addServiceListener(handleService);
-    _discovery = discovery;
+    final browser = _createBrowser();
+    await browser.start(serviceType, handleService);
+    if (generation != _generation) {
+      await browser.stop();
+      return;
+    }
+    _browser = browser;
     OwnMdnsBrowsing.begin();
   }
 
   Future<void> stop() async {
-    final discovery = _discovery;
-    _discovery = null;
+    _generation++;
+    final browser = _browser;
+    _browser = null;
     _known.clear();
-    if (discovery != null) {
+    _resolving.clear();
+    if (browser != null) {
       OwnMdnsBrowsing.end();
-      discovery.removeServiceListener(handleService);
       try {
-        await nsd.stopDiscovery(discovery);
+        await browser.stop();
       } catch (e, s) {
         // iOS forgets the browser once the OS ends the search itself (app
         // suspended, radio/network change) and then rejects the stop with
@@ -84,15 +109,56 @@ class WifiTrainerScanner {
     if (status == nsd.ServiceStatus.lost) {
       final deviceId = deviceIdFor(name);
       _known.remove(deviceId);
+      _resolving.remove(deviceId);
       onLost(deviceId);
       return;
     }
     if (isSelfAdvertisement(service, localAddresses: _localAddresses)) return;
     final port = service.port;
-    final host =
-        service.addresses?.firstOrNullWhere((a) => a.type == InternetAddressType.IPv4)?.address ?? service.host;
-    if (host == null || port == null) return;
+    if (port == null) return;
+    final address = service.addresses?.firstOrNullWhere((a) => a.type == InternetAddressType.IPv4)?.address;
+    if (address != null) {
+      _report(service, address, port);
+      return;
+    }
+    final host = service.host;
+    if (host == null) return;
+    if (InternetAddress.tryParse(host) != null) {
+      _report(service, host, port);
+      return;
+    }
+    _resolveAndReport(service, host, port);
+  }
+
+  /// Device ids whose hostname lookup is in flight, mapped to the lookup's
+  /// token — a newer resolve, a loss or [stop] makes the older one stale.
+  final _resolving = <String, Object>{};
+
+  /// The Windows resolver reports services with a hostname only, and the OS
+  /// can't resolve every advertised name (spaces in "ELITE-JUSTO 2-01090-W"),
+  /// so ask the trainer itself over mDNS. Falls back to the hostname.
+  Future<void> _resolveAndReport(nsd.Service service, String host, int port) async {
+    final deviceId = deviceIdFor(service.name!);
+    final token = Object();
+    _resolving[deviceId] = token;
+    final generation = _generation;
+    String? address;
+    try {
+      address = await _resolveHost(host);
+    } catch (e, s) {
+      recordError(e, s, context: 'WifiTrainerScanner resolve $host');
+    }
+    if (generation != _generation || !identical(_resolving[deviceId], token)) return;
+    _resolving.remove(deviceId);
+    if (address != null && _localAddresses.contains(address) && SelfAdvertisementRegistry.instance.containsPort(port)) {
+      return;
+    }
+    _report(service, address ?? host, port);
+  }
+
+  void _report(nsd.Service service, String host, int port) {
     final trainer = WifiTrainer(syntheticDevice: syntheticDeviceFor(service), host: host, port: port);
+    _resolving.remove(trainer.syntheticDevice.deviceId);
     _known[trainer.syntheticDevice.deviceId] = trainer;
     onFound(trainer);
   }

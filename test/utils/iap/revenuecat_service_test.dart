@@ -47,12 +47,94 @@ void main() {
     });
   });
 
+  group('RevenueCatService.isPurchasedVersion (macOS version strings)', () {
+    test('old paid era (< 4.2.0) is purchased', () {
+      expect(RevenueCatService.isPurchasedVersion('1.0'), isTrue);
+      expect(RevenueCatService.isPurchasedVersion('4.1.9'), isTrue);
+    });
+
+    test('legacy free window (4.2.0..4.3.x) is not purchased', () {
+      expect(RevenueCatService.isPurchasedVersion('4.2.0'), isFalse);
+      expect(RevenueCatService.isPurchasedVersion('4.3.5'), isFalse);
+    });
+
+    test('paid era (4.4.0..6.0.x) is purchased', () {
+      expect(RevenueCatService.isPurchasedVersion('4.4.0'), isTrue);
+      expect(RevenueCatService.isPurchasedVersion('5.0.0'), isTrue);
+      expect(RevenueCatService.isPurchasedVersion('6.0.1'), isTrue);
+    });
+
+    test('first free version (6.1.0, build 138) and later are not purchased', () {
+      expect(RevenueCatService.isPurchasedVersion('6.1.0'), isFalse);
+      expect(RevenueCatService.isPurchasedVersion('7.4.0'), isFalse);
+    });
+  });
+
   group('RevenueCatService.needsSubscriptionSync', () {
     test('only when signed in, Pro in the store, and missing on the backend', () {
       expect(RevenueCatService.needsSubscriptionSync(signedIn: true, storePro: true, backendPro: false), isTrue);
       expect(RevenueCatService.needsSubscriptionSync(signedIn: true, storePro: true, backendPro: true), isFalse);
       expect(RevenueCatService.needsSubscriptionSync(signedIn: true, storePro: false, backendPro: false), isFalse);
       expect(RevenueCatService.needsSubscriptionSync(signedIn: false, storePro: true, backendPro: false), isFalse);
+    });
+  });
+
+  group('RevenueCatService.needsStoreSyncAfterLogin', () {
+    test('account without Base or Pro re-posts the store receipts once', () {
+      expect(
+        RevenueCatService.needsStoreSyncAfterLogin(
+          userId: 'u1',
+          hasFullVersion: false,
+          hasPro: false,
+          syncedUserId: null,
+        ),
+        isTrue,
+      );
+    });
+
+    test('not again for the same account in this launch', () {
+      expect(
+        RevenueCatService.needsStoreSyncAfterLogin(
+          userId: 'u1',
+          hasFullVersion: false,
+          hasPro: false,
+          syncedUserId: 'u1',
+        ),
+        isFalse,
+      );
+    });
+
+    test('again after switching to another account', () {
+      expect(
+        RevenueCatService.needsStoreSyncAfterLogin(
+          userId: 'u2',
+          hasFullVersion: false,
+          hasPro: false,
+          syncedUserId: 'u1',
+        ),
+        isTrue,
+      );
+    });
+
+    test('not when the account already has Base or Pro', () {
+      expect(
+        RevenueCatService.needsStoreSyncAfterLogin(
+          userId: 'u1',
+          hasFullVersion: true,
+          hasPro: false,
+          syncedUserId: null,
+        ),
+        isFalse,
+      );
+      expect(
+        RevenueCatService.needsStoreSyncAfterLogin(
+          userId: 'u1',
+          hasFullVersion: false,
+          hasPro: true,
+          syncedUserId: null,
+        ),
+        isFalse,
+      );
     });
   });
 

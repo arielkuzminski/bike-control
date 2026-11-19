@@ -1,7 +1,7 @@
 name: bike_control
 description: "BikeControl - Control your virtual riding"
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
-version: 7.4.0+161
+version: 7.6.0+166
 
 environment:
   sdk: ^3.9.0
@@ -44,6 +44,7 @@ dependencies:
   sign_in_with_apple: ^7.0.1
 
   nsd: ^4.0.3
+  dbus: ^0.7.15
   ffi: ^2.1.0
   image_picker: ^1.1.2
   file_picker: ^10.3.10
@@ -63,6 +64,7 @@ dependencies:
   windows_iap:
     path: windows_iap
   window_manager: ^0.5.1
+  screen_retriever: ^0.2.0
   multi_window_native:
     path: packages/multi_window_native
   local_network_permission:
@@ -136,11 +138,16 @@ dependency_overrides:
   # off the UI thread (GattDeviceService::Close hang in Store crash reports).
   # + Apple: queues notifications CoreBluetooth refuses (transmit queue full) and
   # resends them when it is ready, so a release sent right after its press is not
-  # lost (#417). Drop once a release contains all of them.
+  # lost (#417).
+  # + Windows: peripheral subscription and read-request callbacks no longer end the
+  # app when a client's link drops mid-callback (#451), and native errors and warnings
+  # reach Dart in release builds (UniversalBle.nativeLogHandler).
+  # + Windows: peripheral error replies no longer crash the app (strlen(NULL)).
+  # Drop once a release contains all of them.
   universal_ble:
     git:
       url: https://github.com/jonasbark/universal_ble.git
-      ref: 04f3030d06fefed68ad72f2441c3587d59f736a0
+      ref: 14a8c73f88f50cb4196e5e55e682aa76b718b694
   path_provider_foundation: ">=2.3.0 <2.6.0"
   # Vendored: GameInput v2 with background input, so gamepads keep working
   # while the trainer app has focus. Keep in sync with pubspec_overrides*.yaml, which
@@ -150,11 +157,24 @@ dependency_overrides:
   # Vendored: background input + generic HID pads on macOS (see its pubspec).
   gamepads_darwin:
     path: packages/gamepads_darwin
+  # Vendored: DNS callbacks are handled on the platform thread and never throw
+  # (a stopped discovery crashed in its browse callback in Store crash reports).
+  nsd_windows:
+    path: packages/nsd_windows
+  # Vendored: native errors from the toast API no longer end the app.
+  flutter_local_notifications_windows:
+    path: packages/flutter_local_notifications_windows
 
 flutter:
   uses-material-design: true
   assets:
     - CHANGELOG.md
+    - changelog/de.md
+    - changelog/es.md
+    - changelog/fr.md
+    - changelog/it.md
+    - changelog/pl.md
+    - changelog/zh.md
     - TROUBLESHOOTING.md
     - INSTRUCTIONS_MYWHOOSH_LINK.md
     - INSTRUCTIONS_REMOTE_CONTROL.md
@@ -171,6 +191,22 @@ flutter:
     - assets/strappo.png
     - assets/ridecave.png
     - assets/velotoss.png
+    - assets/grimpa.png
+    - assets/ictrainer.png
+    - assets/auuki.png
+    - assets/voxvelo.png
+    - assets/veloworkout.png
+    - assets/pedalparty.png
+    - assets/velopopuli.png
+    - assets/vieta.png
+    - assets/dirtwatts.png
+    - assets/wattlog.png
+    - assets/rezvivo.png
+    - assets/openradlr.png
+    - assets/zwotrainer.png
+    - assets/incyclist.png
+    - assets/tour-du-pain.png
+    - assets/rampida.png
     - assets/biketerra.png
     - assets/contours/
     - assets/brand/

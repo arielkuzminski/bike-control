@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:bike_control/bluetooth/devices/bluetooth_device.dart';
 import 'package:bike_control/bluetooth/devices/cycplus/cycplus_bc2.dart';
+import 'package:bike_control/bluetooth/devices/cycplus/cycplus_t7h.dart';
 import 'package:bike_control/bluetooth/devices/elite/elite_square.dart';
 import 'package:bike_control/bluetooth/devices/elite/elite_sterzo.dart';
 import 'package:bike_control/bluetooth/devices/ltwoo/ltwoo_erx.dart';
@@ -116,6 +117,11 @@ void main() {
       final device = _createBleDevice(name: 'Cycplus BC2');
       expect(BluetoothDevice.fromScanResult(device), isInstanceOf<CycplusBc2>());
     });
+    test('CYCPLUS T7 shifters', () {
+      expect(BluetoothDevice.fromScanResult(_createBleDevice(name: 'T7H-L1234')), isInstanceOf<CycplusT7h>());
+      expect(BluetoothDevice.fromScanResult(_createBleDevice(name: 'T7H-R1234')), isInstanceOf<CycplusT7h>());
+      expect(BluetoothDevice.fromScanResult(_createBleDevice(name: 'T7H_DFU 1.0.0')), isNull);
+    });
     test('Other cycplus', () {
       final device = _createBleDevice(name: 'Cycplus 1337');
       expect(BluetoothDevice.fromScanResult(device), isNull);
@@ -125,6 +131,16 @@ void main() {
   group('Detect Shimano Di2', () {
     test('Shimano Di2', () {
       final device = _createBleDevice(name: 'RDR 1337', services: [ShimanoDi2Constants.SERVICE_UUID.toLowerCase()]);
+      expect(BluetoothDevice.fromScanResult(device), isInstanceOf<ShimanoDi2>());
+    });
+    test('EW-WU111 wireless unit with an empty advertisement still detected by name', () {
+      final device = _createBleDevice(name: 'EWWU111');
+      expect(BluetoothDevice.fromScanResult(device), isInstanceOf<ShimanoDi2>());
+    });
+    test('EW-WU111 wireless unit on web, matched by name', () {
+      BluetoothDevice.debugIsWeb = () => true;
+      addTearDown(() => BluetoothDevice.debugIsWeb = null);
+      final device = _createBleDevice(name: 'EWWU111');
       expect(BluetoothDevice.fromScanResult(device), isInstanceOf<ShimanoDi2>());
     });
   });

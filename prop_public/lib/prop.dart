@@ -10,6 +10,7 @@ export 'emulators/click_emulator.dart';
 export 'emulators/definitions/composite_ble_definition.dart';
 export 'emulators/definitions/zwift_emulator_definition.dart';
 export 'emulators/dircon_emulator.dart';
+export 'emulators/transporter/shared_peripheral.dart';
 export 'protocol/zp.pb.dart';
 export 'protocol/zp.pbenum.dart';
 export 'protocol/zwift.pb.dart';

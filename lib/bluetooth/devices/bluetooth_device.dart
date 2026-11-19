@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:bike_control/bluetooth/ble.dart';
+import 'package:bike_control/bluetooth/ble_string.dart';
 import 'package:bike_control/bluetooth/devices/base_device.dart';
 import 'package:bike_control/bluetooth/devices/openbikecontrol/openbikecontrol_device.dart';
 import 'package:bike_control/bluetooth/devices/proxy/proxy_device.dart';
@@ -42,10 +43,12 @@ import 'package:universal_ble/universal_ble.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 
 import 'cycplus/cycplus_bc2.dart';
+import 'cycplus/cycplus_t7h.dart';
 import 'elite/elite_rizer.dart';
 import 'elite/elite_square.dart';
 import 'elite/elite_sterzo.dart';
 import 'ltwoo/ltwoo_erx.dart';
+import 'magene/onelap_key.dart';
 import 'sensors/ble_cadence_device.dart';
 import 'sensors/ble_heart_rate_device.dart';
 import 'sensors/ble_power_device.dart';
@@ -103,6 +106,7 @@ abstract class BluetoothDevice extends BaseDevice {
     ShimanoDi2Constants.SERVICE_UUID_ALTERNATIVE,
     OpenBikeControlConstants.SERVICE_UUID,
     ThinkRiderVs200Constants.SERVICE_UUID,
+    OnelapKeyConstants.serviceUuid,
     // Nordic UART Service — needed so L-TWOO derailleurs show up in filtered
     // scans; device matching itself stays name-gated (NUS is far too generic).
     LtwooErxConstants.SERVICE_UUID,
@@ -144,6 +148,14 @@ abstract class BluetoothDevice extends BaseDevice {
   static bool _isKnownPowerMeterName(String name) =>
       _powerMeterNames.any((knownName) => name.toUpperCase().startsWith(knownName));
 
+  /// Whether [name] is a Shimano crank power meter (`FCR8100P173` for an
+  /// FC-R8100-P, `FCR9200P…` for Dura-Ace). These advertise the E-TUBE config
+  /// service 18FF like every E-TUBE device, but not the D-FLY service 18EF, so
+  /// the services-based [ShimanoDi2] rule must not claim them — and their
+  /// advert does not always carry Cycling Power, so this name alone decides.
+  static bool _isShimanoPowerMeterName(String name) =>
+      RegExp(r'^FC-?[A-Z]\d{4}-?P', caseSensitive: false).hasMatch(name);
+
   /// Whether [scanResult] advertises a trainer service — FTMS or
   /// FE-C-over-BLE — the same two services [ProxyDevice.isSmartTrainer]
   /// checks to decide a device is a smart trainer. Deliberately reuses those
@@ -173,6 +185,11 @@ abstract class BluetoothDevice extends BaseDevice {
   /// services (FE-C or FTMS) are discovered on connect. Kept to the `-HT`
   /// prefix so other Van Rysel products (straps, power meters) are untouched.
   static bool _isVanRyselTrainerName(String name) => name.toUpperCase().startsWith('VANRYSEL-HT');
+
+  /// The 11-speed Di2 wireless unit (EW-WU111) advertises as `EWWU111`. It is
+  /// claimed by its E-TUBE service elsewhere, but Windows has never surfaced it
+  /// that way in the field, so match it by name too, like the Tacx Neo.
+  static bool _isDi2WirelessUnitName(String name) => name.toUpperCase().startsWith('EWWU');
 
   /// Test seam: overrides the effective [kIsWeb] check so `fromScanResult`'s
   /// web-specific classification branch can be exercised from a normal
@@ -279,14 +296,21 @@ abstract class BluetoothDevice extends BaseDevice {
         _ when MuovBikeConstants.matchesName(scanResult.name!) => MuovBike(scanResult),
         _ when scanResult.name!.toUpperCase().startsWith('CYCPLUS') && scanResult.name!.toUpperCase().contains('BC2') =>
           CycplusBc2(scanResult),
+        _ when CycplusT7h.matchesName(scanResult.name) => CycplusT7h(scanResult),
         _ when scanResult.name!.toUpperCase().startsWith('THINK VS') => ThinkRiderVs200(scanResult),
+        _ when OnelapKeyConstants.matchesName(scanResult.name) => OnelapKey(scanResult),
         _ when LtwooErxConstants.matchesName(scanResult.name) => LtwooErx(scanResult),
         // Windows' universal_ble surfaces the Tacx Neo with an empty
         // advertisement (no services/serviceData), so match on name alone.
         _ when scanResult.name!.toUpperCase().startsWith('TACX NEO') => ProxyDevice(scanResult),
         // Same for Decathlon Van Rysel HT trainers — see [_isVanRyselTrainerName].
         _ when _isVanRyselTrainerName(scanResult.name!) => ProxyDevice(scanResult),
+        // Before the Di2 rule — see [_isShimanoPowerMeterName].
+        _ when _isShimanoPowerMeterName(scanResult.name!) && !_advertisesTrainerService(scanResult) => BlePowerDevice(
+          scanResult,
+        ),
         _ when scanResult.name!.toUpperCase().startsWith('RDR') => ShimanoDi2(scanResult),
+        _ when _isDi2WirelessUnitName(scanResult.name!) => ShimanoDi2(scanResult),
         _ when scanResult.name!.toUpperCase().startsWith('SRAM') && _sramIsConnectable(scanResult) => SramAxs(
           scanResult,
         ),
@@ -367,7 +391,9 @@ abstract class BluetoothDevice extends BaseDevice {
         _ when MuovBikeConstants.matchesName(scanResult.name!) => MuovBike(scanResult),
         _ when scanResult.name!.toUpperCase().startsWith('CYCPLUS') && scanResult.name!.toUpperCase().contains('BC2') =>
           CycplusBc2(scanResult),
+        _ when CycplusT7h.matchesName(scanResult.name) => CycplusT7h(scanResult),
         _ when scanResult.name!.toUpperCase().startsWith('THINK VS') => ThinkRiderVs200(scanResult),
+        _ when OnelapKeyConstants.matchesName(scanResult.name) => OnelapKey(scanResult),
         _ when LtwooErxConstants.matchesName(scanResult.name) => LtwooErx(scanResult),
         // Windows' universal_ble surfaces the Tacx Neo with an empty
         // advertisement (no services/serviceData) — only the name is usable, so
@@ -377,10 +403,17 @@ abstract class BluetoothDevice extends BaseDevice {
         // Same for Decathlon Van Rysel HT trainers — see [_isVanRyselTrainerName].
         _ when _isVanRyselTrainerName(scanResult.name!) => ProxyDevice(scanResult),
         //_ when scanResult.services.contains(CycplusBc2Constants.SERVICE_UUID.toLowerCase()) => CycplusBc2(scanResult),
+        // Before the Di2 rules, which would claim it by its E-TUBE service —
+        // see [_isShimanoPowerMeterName].
+        _ when _isShimanoPowerMeterName(scanResult.name!) && !_advertisesTrainerService(scanResult) => BlePowerDevice(
+          scanResult,
+        ),
         _ when scanResult.services.contains(ShimanoDi2Constants.SERVICE_UUID.toLowerCase()) => ShimanoDi2(scanResult),
         _ when scanResult.services.contains(ShimanoDi2Constants.SERVICE_UUID_ALTERNATIVE.toLowerCase()) => ShimanoDi2(
           scanResult,
         ),
+        // See [_isDi2WirelessUnitName].
+        _ when _isDi2WirelessUnitName(scanResult.name!) => ShimanoDi2(scanResult),
         // Before the ProxyDevice branch below, which claims Cycling Power
         // (0x1818) unconditionally via containsAny — including for a
         // legitimately-named power meter, which is wrong. This rule is
@@ -556,8 +589,7 @@ abstract class BluetoothDevice extends BaseDevice {
       if (characteristic == null) return null;
       try {
         final data = await readUpstream(service!.uuid, characteristic.uuid);
-        final decoded = String.fromCharCodes(data).trim();
-        return decoded.isEmpty ? null : decoded;
+        return decodeBleDeviceInfoString(data);
       } catch (_) {
         return null;
       }

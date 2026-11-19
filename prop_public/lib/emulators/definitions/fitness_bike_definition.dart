@@ -591,6 +591,7 @@ class FitnessBikeDefinition extends BleDefinition {
     if (cadence != null) {
       _filteredCadence = _filteredCadence == 0 ? cadence.toDouble() : _filteredCadence + (cadence - _filteredCadence) * 0.4;
     }
+    _checkPowerLockRelease(cadence);
     final parts = [
       if (_powerWN.value != null) '${_powerWN.value} W',
       if (_cadenceRpmN.value != null) '${_cadenceRpmN.value} rpm',
@@ -853,12 +854,66 @@ class FitnessBikeDefinition extends BleDefinition {
     if (value > 0) _lastErgTarget = value;
     _ergTargetPower.value = value;
     _trainerMode.value = TrainerMode.ergMode;
+    _powerLocked = true;
+    _belowCadenceSince = null;
     _updateChainHint();
     _controlChanged(force: true);
   }
 
+  // ---------------------------------------------------------------------------
+  // Power Lock: ERG the rider entered from the buttons ([setManualErgPower]),
+  // not a trainer app's workout. With auto-release on, it lets go once the
+  // rider stops pedalling, so they don't restart against a held wattage.
+  // Reconstructed from the app's use of it; the thresholds are this stub's
+  // choice, not values taken from the full implementation.
+  // ---------------------------------------------------------------------------
+
+  /// How long the cadence has to stay under [powerLockReleaseCadenceRpm].
+  static const Duration powerLockReleaseAfter = Duration(seconds: 5);
+
+  /// The cadence below which the rider counts as no longer pedalling.
+  static const int powerLockReleaseCadenceRpm = 30;
+
+  bool _powerLockAutoRelease = true;
+  bool _powerLocked = false;
+  DateTime? _belowCadenceSince;
+
+  /// Whether Power Lock lets go when the rider stops pedalling.
+  bool get powerLockAutoRelease => _powerLockAutoRelease;
+
+  /// Called after auto-release has dropped Power Lock back to SIM.
+  VoidCallback? onPowerLockReleased;
+
+  void setPowerLockAutoRelease(bool enabled) {
+    _powerLockAutoRelease = enabled;
+    _belowCadenceSince = null;
+  }
+
+  void _checkPowerLockRelease(int? cadence) {
+    if (!_powerLockAutoRelease || !_powerLocked || _trainerMode.value != TrainerMode.ergMode) {
+      _belowCadenceSince = null;
+      return;
+    }
+    if (cadence == null || cadence >= powerLockReleaseCadenceRpm) {
+      _belowCadenceSince = null;
+      return;
+    }
+    final now = _now();
+    final since = _belowCadenceSince ??= now;
+    if (now.difference(since) < powerLockReleaseAfter) return;
+    _belowCadenceSince = null;
+    exitErgMode();
+    try {
+      onPowerLockReleased?.call();
+    } catch (e, s) {
+      Logger.recordError('onPowerLockReleased listener failed', e, s);
+    }
+  }
+
   void exitErgMode() {
     if (_trainerMode.value != TrainerMode.ergMode) return;
+    _powerLocked = false;
+    _belowCadenceSince = null;
     _ergTargetPower.value = null;
     _trainerMode.value = _hasGrade ? TrainerMode.simModeVirtualShifting : TrainerMode.simMode;
     _updateChainHint();
@@ -1009,6 +1064,8 @@ class FitnessBikeDefinition extends BleDefinition {
         } else {
           final watts = ByteData.sublistView(Uint8List.fromList(parameters)).getInt16(0, Endian.little);
           setManualErgPower(watts);
+          // The trainer app's workout, not the rider's Power Lock.
+          _powerLocked = false;
           _sendStatus([FtmsStatus.targetPowerChanged, ...parameters.sublist(0, 2)]);
         }
       case FtmsOpcode.setIndoorBikeSimulation:
@@ -1025,6 +1082,7 @@ class FitnessBikeDefinition extends BleDefinition {
         } else {
           _trainerMode.value = TrainerMode.simMode;
           _ergTargetPower.value = null;
+          _powerLocked = false;
           _sendUpstream(ftmsSetTargetResistance(parameters[0]), 'resistance');
         }
       default:
@@ -1038,6 +1096,7 @@ class FitnessBikeDefinition extends BleDefinition {
     _hasGrade = true;
     _simGradeN.value = (sim.gradePercent * 100).round();
     _ergTargetPower.value = null;
+    _powerLocked = false;
     _trainerMode.value = TrainerMode.simModeVirtualShifting;
     _updateChainHint();
     _controlChanged(force: true);
@@ -1535,4 +1594,7 @@ enum TrainerMode { ergMode, simMode, simModeVirtualShifting }
 enum VirtualShiftingMode { targetPower, trackResistance, basicResistance }
 
 /// The wire a trainer's control commands are delivered over.
-enum TrainerControlProtocol { ftms, fec, zwiftHub }
+///
+/// [wahooCps] is Wahoo's control point on the Cycling Power service, for
+/// trainers without FTMS. This stub never detects or offers it.
+enum TrainerControlProtocol { ftms, fec, zwiftHub, wahooCps }

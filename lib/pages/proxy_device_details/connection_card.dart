@@ -5,14 +5,12 @@ import 'package:bike_control/bluetooth/messages/notification.dart';
 import 'package:bike_control/gen/l10n.dart';
 import 'package:bike_control/main.dart';
 import 'package:bike_control/utils/core.dart';
-import 'package:bike_control/utils/iap/iap_manager.dart';
 import 'package:bike_control/utils/keymap/apps/bike_control.dart';
 import 'package:bike_control/utils/keymap/apps/supported_app.dart'
     show SupportedApp, TrainerConnectionType, VsSameDeviceBlock, vsSameDeviceBlock;
 import 'package:bike_control/utils/requirements/multi.dart';
 import 'package:bike_control/utils/requirements/platform.dart';
-import 'package:bike_control/utils/trainer_connect.dart' show trainerConnectErrorMessage;
-import 'package:bike_control/widgets/go_pro_dialog.dart';
+import 'package:bike_control/utils/trainer_connect.dart' show passTrainerConnectGate, trainerConnectErrorMessage;
 import 'package:bike_control/widgets/status_icon.dart';
 import 'package:bike_control/widgets/ui/app_theme.dart' show BkStatusColors;
 import 'package:bike_control/widgets/ui/connection_method.dart' show openPermissionSheet;
@@ -48,6 +46,17 @@ class _ConnectionCardState extends State<ConnectionCard> {
     _ConnectSelection.proxy,
     _ConnectSelection.none,
   ];
+
+  /// [_selections] minus Proxy when the trainer app can't find a trainer over
+  /// WiFi (Proxy mirrors it over WiFi only) — unless Proxy is what is running
+  /// right now, so the card never hides the active mode.
+  List<_ConnectSelection> _offeredSelections(_ConnectSelection active) {
+    if (ProxyDevice.appTakesTrainerOverWifi(core.settings.getTrainerApp())) return _selections;
+    return [
+      for (final s in _selections)
+        if (s != _ConnectSelection.proxy || active == _ConnectSelection.proxy) s,
+    ];
+  }
 
   /// Resolves which concrete Virtual Shifting [RetrofitMode] a fresh connect
   /// should start in: the last saved VS transport if there is one (already
@@ -169,12 +178,10 @@ class _ConnectionCardState extends State<ConnectionCard> {
       return;
     }
 
-    if (IAPManager.instance.isTrialExpired) {
-      await showGoProDialog(context);
-      return;
-    }
-
     final RetrofitMode next = selection == _ConnectSelection.proxy ? RetrofitMode.proxy : _initialVsTransport;
+    // Virtual shifting runs on the daily trial without Pro; proxy mode needs
+    // Pro once the trial period is over.
+    if (!await passTrainerConnectGate(context, next)) return;
     if (next == RetrofitMode.bluetooth) {
       final ok = await _ensureBluetoothAdvertisePermissions();
       if (!ok) return;
@@ -374,7 +381,7 @@ class _ConnectionCardState extends State<ConnectionCard> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             spacing: 8,
             children: [
-              for (final s in _selections) _radioCard(s, selection, mode, cs),
+              for (final s in _offeredSelections(selection)) _radioCard(s, selection, mode, cs),
             ],
           ),
         ),

@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io' show Platform;
 
 import 'package:bike_control/main.dart' show recordError;
+import 'package:bike_control/services/overlay/overlay_display_placement.dart';
 import 'package:bike_control/services/overlay/overlay_state.dart';
 import 'package:bike_control/widgets/overlay/overlay_app.dart';
 import 'package:bike_control/widgets/overlay/overlay_window_fit.dart';
@@ -87,33 +88,18 @@ Future<void> _runOverlay(int windowId, List<String> args) async {
     }
   });
 
-  // Restore the persisted position if main sent one. The plugin's positional
-  // ordering of Dart entrypoint args differs between macOS (routeName, theme,
-  // argsJson) and Windows (map-iteration order), so locate the JSON payload
-  // by content rather than by index.
-  Offset? initialPosition;
-  double? initialOpacity;
-  for (var i = 1; i < args.length; i++) {
-    final raw = args[i];
-    if (!raw.startsWith('{')) continue;
-    try {
-      final m = jsonDecode(raw) as Map<String, dynamic>;
-      final x = (m['x'] as num?)?.toDouble();
-      final y = (m['y'] as num?)?.toDouble();
-      if (x != null && y != null) {
-        initialPosition = Offset(x, y);
-      }
-      initialOpacity = (m['opacity'] as num?)?.toDouble();
-      // The args blob is a single JSON object carrying both position and
-      // opacity, so stop once we've decoded it.
-      break;
-    } catch (e, s) {
-      recordError(e, s, context: 'overlay.position.decode');
-    }
-  }
+  // Restore the persisted position and opacity if main sent them.
+  final launch = decodeOverlayLaunchArgs(args);
+  final initialPosition = launch.position;
+  final initialOpacity = launch.opacity;
   if (initialPosition != null) {
     await wm.windowManager.setPosition(initialPosition);
   }
+  // The saved position may be on a display that has since been disconnected,
+  // and a display can also go away while the overlay is open.
+  final displayWatcher = OverlayDisplayWatcher();
+  await displayWatcher.ensureVisible();
+  displayWatcher.start();
   if (initialOpacity != null) {
     try {
       await wm.windowManager.setOpacity(_clampOpacity(initialOpacity));
@@ -142,7 +128,7 @@ Future<void> _runOverlay(int windowId, List<String> args) async {
     }
   });
 
-  final overlayListener = _OverlayWindowListener(windowId, stateListenerId, opacityListenerId);
+  final overlayListener = _OverlayWindowListener(windowId, stateListenerId, opacityListenerId, displayWatcher);
   wm.windowManager.addListener(overlayListener);
 
   runApp(
@@ -197,10 +183,12 @@ class _OverlayWindowListener extends wm.WindowListener {
   final int _windowId;
   final String _stateListenerId;
   final String _opacityListenerId;
+  final OverlayDisplayWatcher _displayWatcher;
   _OverlayWindowListener(
     this._windowId,
     this._stateListenerId,
     this._opacityListenerId,
+    this._displayWatcher,
   );
 
   @override
@@ -246,6 +234,7 @@ class _OverlayWindowListener extends wm.WindowListener {
         recordError(e, s, context: 'overlay.window.close.unregisterListener');
       }
       try {
+        _displayWatcher.stop();
         wm.windowManager.removeListener(this);
       } catch (e, s) {
         recordError(e, s, context: 'overlay.window.close.removeListener');
@@ -287,6 +276,32 @@ Future<void> _fitWindow(Size content) async {
   final size = Size(content.width + frame.width, content.height + frame.height);
   await wm.windowManager.setMinimumSize(size);
   await wm.windowManager.setSize(size);
+}
+
+/// Finds the JSON payload main passed to the overlay sub-window and decodes
+/// the persisted position and opacity from it.
+///
+/// Where the payload sits in [args] depends on the platform: macOS passes
+/// (routeName, theme, argsJson), while the Windows runner builds the list by
+/// walking the createWindow argument map, which is sorted by key, so argsJson
+/// comes first. Every argument is scanned and the payload found by content.
+@visibleForTesting
+({Offset? position, double? opacity}) decodeOverlayLaunchArgs(List<String> args) {
+  for (final raw in args) {
+    if (!raw.startsWith('{')) continue;
+    try {
+      final m = jsonDecode(raw) as Map<String, dynamic>;
+      final x = (m['x'] as num?)?.toDouble();
+      final y = (m['y'] as num?)?.toDouble();
+      return (
+        position: x != null && y != null ? Offset(x, y) : null,
+        opacity: (m['opacity'] as num?)?.toDouble(),
+      );
+    } catch (e, s) {
+      recordError(e, s, context: 'overlay.launchArgs.decode');
+    }
+  }
+  return (position: null, opacity: null);
 }
 
 /// Guards the native `setOpacity` call against an out-of-range value arriving

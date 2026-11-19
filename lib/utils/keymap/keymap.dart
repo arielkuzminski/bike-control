@@ -186,27 +186,31 @@ class Keymap {
   }
 
   void addNewButtons(List<ControllerButton> availableButtons) {
-    final newButtons = availableButtons.filter(
-      (button) {
-        final existing = getKeyPair(button, trigger: ButtonTrigger.singleClick);
-        return existing == null;
-      },
-    ).toList();
+    // Only buttons the mapping knows nothing about. A button it maps on
+    // another trigger alone (the Y on a long press) must not get its own
+    // default added as a click — an action the app may not have — nor a
+    // second copy of the mapped one.
+    final newButtons = availableButtons.filter((button) => getKeyPairs(button).isEmpty).toList();
+    if (newButtons.isEmpty) return;
+    final offered = core.settings.getTrainerApp()?.offeredInGameActions;
     for (final button in newButtons) {
       final buttonFromBase = core.settings.getTrainerApp()?.keymap.findSimilarKeyPair(
         button,
         trigger: ButtonTrigger.singleClick,
       );
+      // The button's built-in default only if the app can perform it — left
+      // unassigned otherwise, rather than bound to an action that goes nowhere.
+      final action = offered == null || offered.contains(button.action) ? button.action : null;
       addKeyPair(
         KeyPair(
           touchPosition: buttonFromBase?.touchPosition ?? Offset.zero,
           buttons: [button],
-          inGameAction: button.action,
+          inGameAction: action,
           physicalKey: buttonFromBase?.physicalKey,
           logicalKey: buttonFromBase?.logicalKey,
           trigger:
               buttonFromBase?.trigger ??
-              (button.action?.isLongPress == true ? ButtonTrigger.longPress : ButtonTrigger.singleClick),
+              (action?.isLongPress == true ? ButtonTrigger.longPress : ButtonTrigger.singleClick),
           inGameActionValue: buttonFromBase?.inGameActionValue,
           androidAction: buttonFromBase?.androidAction,
           androidIntentAction: buttonFromBase?.androidIntentAction,
@@ -405,11 +409,13 @@ class KeyPair {
       (inGameAction != null &&
           core.logic.showZwiftBleEmulator &&
           core.settings.getZwiftBleEmulatorEnabled() &&
-          core.zwiftEmulator.supportedActions.contains(resolveControllerAction(inGameAction))) ||
+          core.zwiftEmulator.supportedActions.contains(resolveControllerAction(inGameAction)) &&
+          _appHasControllerAction(inGameAction)) ||
       (inGameAction != null &&
           core.logic.showZwiftMsdnEmulator &&
           core.settings.getZwiftMdnsEmulatorEnabled() &&
-          core.zwiftMdnsEmulator.supportedActions.contains(resolveControllerAction(inGameAction))) ||
+          core.zwiftMdnsEmulator.supportedActions.contains(resolveControllerAction(inGameAction)) &&
+          _appHasControllerAction(inGameAction)) ||
       (inGameAction != null &&
           [InGameAction.headwindHeartRateMode, InGameAction.headwindSpeed].contains(inGameAction) &&
           (core.connection.accessories.isNotEmpty || kDebugMode)) ||
@@ -424,6 +430,9 @@ class KeyPair {
       (screenshotPath != null && screenshotPath!.trim().isNotEmpty) ||
       (command != null && command!.trim().isNotEmpty);
 
+  static bool _appHasControllerAction(InGameAction? action) =>
+      !(core.settings.getTrainerApp()?.unsupportedControllerActions.contains(resolveControllerAction(action)) ?? false);
+
   /// True when BikeControl itself is the trainer app ("self-hosted") and this
   /// keypair's action is a trainer action BikeControl runs on the connected
   /// trainer directly ([BaseActions.performAction] hands [trainerActions] to
@@ -437,7 +446,14 @@ class KeyPair {
       !hasNoAction && toString() == AppLocalizations.current.actionWaitsForConnectionMethod;
 
   @override
-  String toString() {
+  String toString() => _label(coordinates: true);
+
+  /// [toString] without where Local taps on the screen ("X:80, Y:94
+  /// (Shift down)" reads "Shift down"): for a list of buttons, where the
+  /// rider wants to know what a press does, not where it lands.
+  String get actionLabel => _label(coordinates: false);
+
+  String _label({required bool coordinates}) {
     final text =
         (inGameAction != null &&
             (core.logic.emulatorEnabled || inGameAction!.isOutsideTrainerApp || runsInSelfHostedBikeControl))
@@ -468,7 +484,9 @@ class KeyPair {
         : (physicalKey != null && core.actionHandler.supportedModes.contains(SupportedMode.keyboard))
         ? null
         : (touchPosition != Offset.zero && core.logic.showLocalRemoteOptions)
-        ? 'X:${touchPosition.dx.toInt()}, Y:${touchPosition.dy.toInt()}${inGameAction != null ? ' (${inGameAction!.title})' : ''}'
+        ? (!coordinates && inGameAction != null)
+              ? inGameAction!.title
+              : 'X:${touchPosition.dx.toInt()}, Y:${touchPosition.dy.toInt()}${inGameAction != null ? ' (${inGameAction!.title})' : ''}'
         : '';
     if (text != null && text.isNotEmpty) {
       return text;

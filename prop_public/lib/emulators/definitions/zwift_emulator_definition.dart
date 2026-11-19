@@ -8,7 +8,9 @@ import 'package:universal_ble/universal_ble.dart';
 class ZwiftEmulatorDefinition extends ProxyBikeDefinition {
   ZwiftEmulatorDefinition({
     required super.device,
-  }) : super(
+    bool Function()? asRide,
+  }) : asRide = asRide ?? _never,
+       super(
          data: ValueNotifier(''),
          services: [
            BleService(
@@ -21,6 +23,13 @@ class ZwiftEmulatorDefinition extends ProxyBikeDefinition {
            ),
          ],
        );
+
+  static bool _never() => false;
+
+  /// Asked on each handshake whether to answer as a Zwift Ride rather than a
+  /// Click. A callback because the trainer app can change while the emulator
+  /// runs. Stubbed: the stub answers no handshake, so it is never read here.
+  final bool Function() asRide;
 
   @override
   List<String> get serviceUUIDs => [FtmsMdnsConstants.ZWIFT_RIDE_CUSTOM_SERVICE_UUID];

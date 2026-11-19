@@ -71,6 +71,10 @@ class ShiftingConfig {
   /// Watts per ERG −/+ press; one of [ErgPowerStepping.stepChoicesW].
   final int ergStepW;
 
+  /// Whether manual ERG (Power Lock) returns to SIM when the rider stops
+  /// pedalling ([FitnessBikeDefinition.setPowerLockAutoRelease]).
+  final bool powerLockAutoRelease;
+
   const ShiftingConfig({
     required this.name,
     required this.trainerKey,
@@ -93,6 +97,7 @@ class ShiftingConfig {
     this.powerAt30KphW = FitnessBikeDefinition.defaultPowerAt30KphW,
     this.ergStartSource = ErgPowerStepping.defaultStartSource,
     this.ergStepW = ErgPowerStepping.defaultStepW,
+    this.powerLockAutoRelease = true,
   });
 
   factory ShiftingConfig.defaults({
@@ -124,7 +129,12 @@ class ShiftingConfig {
     final rider = (json['riderWeightKg'] as num?)?.toDouble() ?? riderWeightDefaultKg;
     final rawMaxGear = (json['maxGear'] as num?)?.toInt() ?? maxGearDefault;
     final rawRatios = json['gearRatios'] as List?;
-    final rawErgStart = json['ergStartSource'] as String?;
+    // Stored under a new key since the default became "current power": 7.4.0
+    // wrote 'ergStartSource' for every saved config, so "lastTarget" there is
+    // almost always the old default rather than a choice, and only a rider
+    // who picked "current power" is carried over from it.
+    final rawErgStart = json['ergStart'] as String? ??
+        (json['ergStartSource'] == ErgStartSource.currentPower.name ? ErgStartSource.currentPower.name : null);
     final rawErgStep = (json['ergStepW'] as num?)?.toInt();
     final parsedRatios = rawRatios?.whereType<num>().map((e) => e.toDouble()).toList();
     return ShiftingConfig(
@@ -167,6 +177,7 @@ class ShiftingConfig {
         orElse: () => ErgPowerStepping.defaultStartSource,
       ),
       ergStepW: ErgPowerStepping.stepChoicesW.contains(rawErgStep) ? rawErgStep! : ErgPowerStepping.defaultStepW,
+      powerLockAutoRelease: (json['powerLockAutoRelease'] as bool?) ?? true,
     );
   }
 
@@ -190,8 +201,9 @@ class ShiftingConfig {
         'gearStepPct': gearStepPct,
         'shiftTransitionMs': shiftTransitionMs,
         'powerAt30KphW': powerAt30KphW,
-        'ergStartSource': ergStartSource.name,
+        'ergStart': ergStartSource.name,
         'ergStepW': ergStepW,
+        'powerLockAutoRelease': powerLockAutoRelease,
       };
 
   ShiftingConfig copyWith({
@@ -217,6 +229,7 @@ class ShiftingConfig {
     int? powerAt30KphW,
     ErgStartSource? ergStartSource,
     int? ergStepW,
+    bool? powerLockAutoRelease,
   }) {
     final resolvedMaxGear = maxGear ?? this.maxGear;
     final resolvedRatios = clearGearRatios ? null : (gearRatios ?? this.gearRatios);
@@ -247,6 +260,7 @@ class ShiftingConfig {
       powerAt30KphW: powerAt30KphW ?? this.powerAt30KphW,
       ergStartSource: ergStartSource ?? this.ergStartSource,
       ergStepW: ergStepW ?? this.ergStepW,
+      powerLockAutoRelease: powerLockAutoRelease ?? this.powerLockAutoRelease,
     );
   }
 
@@ -274,7 +288,8 @@ class ShiftingConfig {
           shiftTransitionMs == other.shiftTransitionMs &&
           powerAt30KphW == other.powerAt30KphW &&
           ergStartSource == other.ergStartSource &&
-          ergStepW == other.ergStepW);
+          ergStepW == other.ergStepW &&
+          powerLockAutoRelease == other.powerLockAutoRelease);
 
   // Object.hash takes at most 20 values; the config now has more fields.
   @override
@@ -300,5 +315,6 @@ class ShiftingConfig {
         powerAt30KphW,
         ergStartSource,
         ergStepW,
+        powerLockAutoRelease,
       ]);
 }

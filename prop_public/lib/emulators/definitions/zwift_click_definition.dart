@@ -10,7 +10,9 @@ import 'package:universal_ble/universal_ble.dart';
 
 class ZwiftClickDefinition extends ProxyBikeDefinition {
   final DateTime connectionDate;
-  final Uint8List? vendorMessage;
+  /// The controller's unlock challenge. Mutable: it arrives a few seconds into
+  /// the connection, after the definition was built, and is replayed to Zwift.
+  Uint8List? vendorMessage;
   final ValueNotifier<bool> isUnlocked;
   final ValueNotifier<bool> alreadyUnlocked;
   final ValueNotifier<bool> waiting;
